@@ -2,6 +2,7 @@ import { readActivePreview } from '@/app/chat/right-rail/preview-reader'
 import { writeAgentTerminalChunk } from '@/app/right-sidebar/terminal/agent-terminal-stream'
 import { readActiveTerminal } from '@/app/right-sidebar/terminal/buffer'
 import { closeAgentTerminalByProc } from '@/app/right-sidebar/terminal/terminals'
+import type { GatewayEventPayload } from '@/lib/chat-messages'
 import type { PreviewActAction } from '@/lib/preview-act/act-in-page'
 import type { TourAction, TourStep } from '@/lib/tour'
 import { $gateway } from '@/store/gateway'
@@ -38,6 +39,61 @@ const loadPreviewEngine = () => {
     .catch(stable)
     .then(mod => mod.actOnActivePreview as Awaited<ReturnType<typeof stable>>['actOnActivePreview'])
 }
+
+/** Translate one `preview.act.request` into the engine's action.
+ *
+ *  Extracted so the mapping is testable on its own: the bridge forwards fields
+ *  ONE BY ONE, so a parameter missing from this object is silently dropped on
+ *  the wire — the tool accepts it, the gateway relays it, and the engine never
+ *  sees it. That is exactly how `full` was lost: `elements` with `full: true`
+ *  kept answering with a delta, leaving the agent no way to re-establish a
+ *  baseline for a page it had lost track of.
+ *
+ *  Absent fields stay `undefined` rather than getting a bridge-invented default,
+ *  so the engine's own defaults remain the single source of that policy. */
+export function previewActionFromPayload(
+  payload: GatewayEventPayload | undefined
+): Omit<PreviewActAction, 'kind'> & { kind: string } {
+  return {
+    amount: payload?.amount,
+    full: payload?.full,
+    key: payload?.key,
+    kind: payload?.action ?? '',
+    max: payload?.max,
+    ref: payload?.ref,
+    selector: payload?.selector,
+    submit: payload?.submit,
+    text: payload?.text,
+    to: payload?.to as PreviewActAction['to']
+  }
+}
+
+/** Whether a desktop-surface bridge request may run for the session that sent
+ *  it, given whether that session is the one on screen.
+ *
+ *  The distinction is what the request DOES, not which chat is in the
+ *  foreground:
+ *
+ *  - `tour.request` PAINTS on the user's screen (driver.js overlays) and
+ *    `pane.focus` / layout presets rearrange the window, so a background turn
+ *    doing either would seize a screen the user is using elsewhere. Those stay
+ *    foreground-only (desktop AGENTS.md: "Isolate the foreground").
+ *  - `preview.act.request` acts on the preview pane, which is WINDOW-scoped:
+ *    its tabs and active-tab id live in window-level stores, not in any session.
+ *    Nothing is published into the chat view, so the foreground rule does not
+ *    apply -- and gating it broke the ordinary case of leaving the browser open
+ *    in the side pane, asking one session to work in it, and switching chats
+ *    while it runs. `preview.read.request` never had the gate, so reads worked
+ *    while clicks on the same page were refused.
+ *
+ *  Exported as data so the contract is testable and lives in one place. */
+export function bridgeRequestAllowed(eventType: string, isActiveEvent: boolean): boolean {
+  return FOREGROUND_ONLY_BRIDGE_EVENTS.has(eventType) ? isActiveEvent : true
+}
+
+/** Requests that put something on the user's screen, and so must not run for a
+ *  session the user is not looking at. */
+const FOREGROUND_ONLY_BRIDGE_EVENTS = new Set(['tour.request'])
 
 /** Desktop-surface bridge events: read-back requests the agent blocks on
  *  (terminal/preview/window), agent terminal streaming, pane reveal, and
@@ -87,9 +143,23 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
   if (event.type === 'preview.act.request') {
     // drive_preview tool: click/type/scroll/press inside the guest page, or
     // drive the pane's history. Dynamic import keeps the injected engine off
-    // the boot path. Active session only: a background turn must never reach
-    // into the page the user is working in (desktop AGENTS.md: offer, don't
-    // hijack).
+    // the boot path.
+    //
+    // NOT gated on the routed session being the one on screen. The preview pane
+    // is WINDOW-scoped -- its tabs and active-tab id live in window-level
+    // stores, not in any session -- so "which chat is in the foreground" says
+    // nothing about whether this request may touch it. Gating on it broke the
+    // ordinary case: the user leaves the browser open in the side pane, asks one
+    // session to work in it, then switches to another chat while it runs, and
+    // every action from then on failed with "only takes actions in the session
+    // the user is looking at" -- about a pane still sitting right there. The
+    // companion preview.read.request above never had the gate, so reads
+    // succeeded while clicks were refused on the very same page, which is the
+    // tell that the gate was guarding the wrong noun.
+    //
+    // What the foreground rule protects is PUBLISHING into the view the user is
+    // looking at (desktop AGENTS.md: "Isolate the foreground"), and this path
+    // publishes nothing: it acts on the pane and answers the blocked tool.
     const requestId = typeof payload?.request_id === 'string' ? payload.request_id : ''
 
     if (requestId) {
@@ -99,30 +169,11 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
           text: result ? JSON.stringify(result) : ''
         })
 
-      if (isActiveEvent) {
-        void loadPreviewEngine()
-          .then(run =>
-            run({
-              amount: payload?.amount,
-              key: payload?.key,
-              kind: payload?.action ?? '',
-              max: payload?.max,
-              ref: payload?.ref,
-              selector: payload?.selector,
-              submit: payload?.submit,
-              text: payload?.text,
-              to: payload?.to as PreviewActAction['to']
-            })
-          )
-          .then(answer, error =>
-            answer({ error: error instanceof Error ? error.message : String(error), success: false })
-          )
-      } else {
-        void answer({
-          error: 'The in-app browser only takes actions in the session the user is looking at.',
-          success: false
-        })
-      }
+      void loadPreviewEngine()
+        .then(run => run(previewActionFromPayload(payload)))
+        .then(answer, error =>
+          answer({ error: error instanceof Error ? error.message : String(error), success: false })
+        )
     }
 
     return true
@@ -183,7 +234,7 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
           text: result ? JSON.stringify(result) : ''
         })
 
-      if (isActiveEvent) {
+      if (bridgeRequestAllowed(event.type, isActiveEvent)) {
         void import('@/lib/tour')
           .then(({ runTour }) =>
             runTour(

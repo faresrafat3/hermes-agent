@@ -42,7 +42,6 @@ from agent.message_metadata import append_message, stamp_message_timestamp
 from agent.message_sanitization import (
     _sanitize_surrogates,
     _repair_tool_call_arguments,
-    sanitize_for_agentrouter,
 )
 from agent.reasoning_summaries import separate_glued_reasoning_blocks
 from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
@@ -51,30 +50,6 @@ from utils import base_url_host_matches, base_url_hostname, env_float, env_int
 
 logger = logging.getLogger(__name__)
 _OPENROUTER_PROVIDER_SORT_VALUES = {"throughput", "latency", "price"}
-
-# --- agentrouter.org debug payload dumper -----------------------------------
-_AR_DUMP_FLAG = "/tmp/ar_dump_on"
-_AR_DUMP_PATH = "/tmp/ar_payloads.jsonl"
-
-
-def _maybe_dump_agentrouter_payload(
-    tag: str, api_kwargs: dict, provider: str, base_url: str = ""
-) -> None:
-    """Append an outbound agentrouter payload to /tmp/ar_payloads.jsonl if the dump flag is set."""
-    try:
-        if not os.path.exists(_AR_DUMP_FLAG):
-            return
-        from agent.message_sanitization import _is_agentrouter_target
-
-        if not _is_agentrouter_target(provider, base_url):
-            return
-        import json as _json
-        with open(_AR_DUMP_PATH, "a", encoding="utf-8") as fh:
-            fh.write(_json.dumps({"tag": tag, "provider": provider, "kwargs": api_kwargs},
-                                 ensure_ascii=False, default=str) + "\n")
-    except Exception:
-        pass
-
 _PROVIDER_STREAM_ERROR_FINISH_REASONS = {"error", "error_finish"}
 _PROVIDER_STREAM_SSE_FIELDS = {"event", "data", "id", "retry"}
 _PROVIDER_STREAM_ERROR_TEXT_LIMIT = 4096
@@ -357,10 +332,7 @@ def _provider_stream_error_from_json_decode_error(
 def _iter_provider_stream_chunks(stream, *, response: Any = None):
     """Yield SDK chunks while translating SDK-level SSE decode failures."""
     try:
-        for chunk in stream:
-            if chunk is None:
-                continue  # agentrouter.org literal `data: null` SSE frame
-            yield chunk
+        yield from stream
     except json.JSONDecodeError as error:
         stream_response = response() if callable(response) else response
         if stream_response is None:
@@ -967,30 +939,6 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     interrupt, abort, cancellation, and close semantics stay in the callers —
     this helper only issues the request.
     """
-    _maybe_dump_agentrouter_payload(
-        "dispatch", api_kwargs, getattr(agent, "provider", ""),
-        getattr(agent, "base_url", "") or "",
-    )
-    api_kwargs = sanitize_for_agentrouter(
-        api_kwargs, getattr(agent, "provider", ""),
-        base_url=getattr(agent, "base_url", "") or "",
-    )
-    _maybe_dump_agentrouter_payload(
-        "dispatch", api_kwargs, getattr(agent, "provider", ""),
-        getattr(agent, "base_url", "") or "",
-    )
-    api_kwargs = sanitize_for_agentrouter(
-        api_kwargs, getattr(agent, "provider", ""),
-        base_url=getattr(agent, "base_url", "") or "",
-    )
-    _maybe_dump_agentrouter_payload(
-        "dispatch", api_kwargs, getattr(agent, "provider", ""),
-        getattr(agent, "base_url", "") or "",
-    )
-    api_kwargs = sanitize_for_agentrouter(
-        api_kwargs, getattr(agent, "provider", ""),
-        base_url=getattr(agent, "base_url", "") or "",
-    )
     if agent.api_mode == "codex_responses":
         request_client = make_client("codex_stream_request")
         return agent._run_codex_stream(
@@ -3064,54 +3012,6 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 for internal_key in [k for k in api_msg if isinstance(k, str) and k.startswith("_")]:
                     api_msg.pop(internal_key, None)
 
-        # agentrouter.org Filter A — defang sensitive words on the outbound
-        # summary request (hand-built; bypasses dispatch AND streaming).
-        _maybe_dump_agentrouter_payload(
-            "iteration_summary", {"model": agent.model, "messages": api_messages},
-            getattr(agent, "provider", ""),
-            getattr(agent, "base_url", "") or "",
-        )
-        # wrap the message LIST in a kwargs dict: sanitize_for_agentrouter
-        # expects the request-kwargs shape and mutates messages in place.
-        _summary_kwargs = {"messages": api_messages}
-        sanitize_for_agentrouter(
-            _summary_kwargs, getattr(agent, "provider", ""),
-            base_url=getattr(agent, "base_url", "") or "",
-        )
-        api_messages = _summary_kwargs["messages"]
-
-        # agentrouter.org Filter A — defang sensitive words on the outbound
-        # summary request (hand-built; bypasses dispatch AND streaming).
-        _maybe_dump_agentrouter_payload(
-            "iteration_summary", {"model": agent.model, "messages": api_messages},
-            getattr(agent, "provider", ""),
-            getattr(agent, "base_url", "") or "",
-        )
-        # wrap the message LIST in a kwargs dict: sanitize_for_agentrouter
-        # expects the request-kwargs shape and mutates messages in place.
-        _summary_kwargs = {"messages": api_messages}
-        sanitize_for_agentrouter(
-            _summary_kwargs, getattr(agent, "provider", ""),
-            base_url=getattr(agent, "base_url", "") or "",
-        )
-        api_messages = _summary_kwargs["messages"]
-
-        # agentrouter.org Filter A — defang sensitive words on the outbound
-        # summary request (hand-built; bypasses dispatch AND streaming).
-        _maybe_dump_agentrouter_payload(
-            "iteration_summary", {"model": agent.model, "messages": api_messages},
-            getattr(agent, "provider", ""),
-            getattr(agent, "base_url", "") or "",
-        )
-        # wrap the message LIST in a kwargs dict: sanitize_for_agentrouter
-        # expects the request-kwargs shape and mutates messages in place.
-        _summary_kwargs = {"messages": api_messages}
-        sanitize_for_agentrouter(
-            _summary_kwargs, getattr(agent, "provider", ""),
-            base_url=getattr(agent, "base_url", "") or "",
-        )
-        api_messages = _summary_kwargs["messages"]
-
         summary_extra_body = {}
         try:
             from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE as _OMIT_TEMP
@@ -4059,14 +3959,6 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         attempt_stream_response = {"value": None}
 
         def _open_stream(next_api_kwargs: dict[str, Any]):
-            _maybe_dump_agentrouter_payload(
-                "stream", next_api_kwargs, getattr(agent, "provider", ""),
-                getattr(agent, "base_url", "") or "",
-            )
-            next_api_kwargs = sanitize_for_agentrouter(
-                next_api_kwargs, getattr(agent, "provider", ""),
-                base_url=getattr(agent, "base_url", "") or "",
-            )
             stream_kwargs = {
                 **next_api_kwargs,
                 "stream": True,

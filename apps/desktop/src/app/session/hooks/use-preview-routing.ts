@@ -14,7 +14,7 @@ import {
   requestPreviewReload
 } from '@/store/preview'
 import { $activeSessionId, $currentCwd } from '@/store/session'
-import { $focusedRuntimeId, $sessionTiles } from '@/store/session-states'
+import { $focusedRuntimeId, $sessionStates, $sessionTiles } from '@/store/session-states'
 import type { RpcEvent } from '@/types/hermes'
 
 type EventHandler = (event: RpcEvent) => void
@@ -29,11 +29,32 @@ function asRecord(payload: unknown): Record<string, unknown> {
   return payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
 }
 
-function sessionIsOnScreen(sessionId: string): boolean {
+/** Whether `sessionId` is a session of THIS window, and so may open or tidy its
+ *  preview pane.
+ *
+ *  Deliberately broader than "is it the chat currently on screen". The pane is
+ *  WINDOW-scoped -- its tabs live in window-level stores, not in any session --
+ *  and the turn's routing has already scoped this event to this window. The
+ *  original gate ("the active session only -- a background turn never hijacks
+ *  it", f071f42244) was aimed at a turn from somewhere else seizing the pane
+ *  under the user; that is still refused, because an id the window is not
+ *  streaming matches nothing below.
+ *
+ *  Keying it to the FOCUSED chat instead broke the ordinary case: leave the
+ *  browser open in the side pane, ask one session to work in it, then switch to
+ *  another chat while it runs -- from that point every `open_preview` was
+ *  dropped in silence while the tool still reported success, so the agent
+ *  carried on against a pane showing the previous page. A live session of this
+ *  window is not a hijack; it is the user's own instruction arriving a moment
+ *  after they looked away. */
+function sessionIsInThisWindow(sessionId: string): boolean {
   return (
     sessionId === $focusedRuntimeId.get() ||
     sessionId === $activeSessionId.get() ||
-    $sessionTiles.get().some(tile => tile.runtimeId === sessionId)
+    $sessionTiles.get().some(tile => tile.runtimeId === sessionId) ||
+    // Runtime sessions this window is streaming, on screen or not. Keyed by
+    // runtime id, which is what a gateway event carries.
+    Object.hasOwn($sessionStates.get(), sessionId)
   )
 }
 
@@ -86,7 +107,7 @@ export function usePreviewRouting({ baseHandleGatewayEvent, currentCwd, requestG
         const { url, label } = asRecord(event.payload)
         const target = typeof url === 'string' ? url.trim() : ''
 
-        if (target && (!event.session_id || sessionIsOnScreen(event.session_id))) {
+        if (target && (!event.session_id || sessionIsInThisWindow(event.session_id))) {
           void normalizeOrLocalPreviewTarget(target, $currentCwd.get() || currentCwd || undefined).then(
             async resolved => {
               if (!resolved) {
@@ -115,7 +136,7 @@ export function usePreviewRouting({ baseHandleGatewayEvent, currentCwd, requestG
         const { url } = asRecord(event.payload)
         const target = typeof url === 'string' ? url.trim() : ''
 
-        if (event.session_id && !sessionIsOnScreen(event.session_id)) {
+        if (event.session_id && !sessionIsInThisWindow(event.session_id)) {
           return
         }
 

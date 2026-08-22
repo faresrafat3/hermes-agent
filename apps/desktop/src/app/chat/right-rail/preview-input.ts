@@ -37,25 +37,40 @@ export interface PreviewInputHandle {
   zoom?: () => number
 }
 
-/** Guest CSS pixels per device-independent pixel — the guest's zoom factor.
+/** Convert a point the act engine measured into the units input events take.
  *
- *  The act engine measures targets with `getBoundingClientRect`, which is CSS
- *  pixels INSIDE the zoomed page, but `sendInputEvent` is a browser-level input
- *  channel and takes device-independent pixels. At any zoom but 100% those two
- *  units differ, so an unconverted point lands at `1/factor` of where the agent
- *  aimed: measured live at zoom 1.222, a click aimed at (620, 130) arrived at
- *  (507, 106) and hit the container instead of the link. Every click, type and
- *  wheel was landing in the wrong place, and the failure was invisible because
- *  the read-back rode the separate script channel and still reported success.
+ *  The engine measures targets with `getBoundingClientRect`, i.e. CSS pixels
+ *  INSIDE the zoomed guest page. `sendInputEvent` is a browser-level input
+ *  channel whose coordinates are scaled by the page's zoom on the way in. The
+ *  relationship was measured live against a page that reports where its
+ *  `pointerdown` actually landed:
  *
- *  A zoom of exactly 1 (the default) is the identity, which is why this went
- *  unnoticed until someone zoomed the app. */
-export function toDeviceIndependent(point: DrivePointLike, factor: number): DrivePointLike {
+ *      css_received = dip_sent / zoomFactor
+ *
+ *  So an unconverted point lands at `1/factor` of where the agent aimed. At
+ *  Fares's zoom factor of 1.2220792770385742, a click aimed at a link centred at
+ *  CSS (620, 130) arrived at CSS (507, 106) and activated the page container
+ *  instead. Inverting that law gives the conversion below — MULTIPLY, so that
+ *  `dip / factor` lands back on the CSS point that was aimed at.
+ *
+ *  Verified against the real Electron input pipeline (a webview at that zoom,
+ *  driven by `sendInputEvent`, on a page that reports what its own pointerdown
+ *  hit). Sending the raw CSS point hit the container; `css * factor` hit the
+ *  link; `css / factor` also hit the container — so the direction here is not a
+ *  guess, and getting it backwards is a silent regression, not a type error.
+ *
+ *  The failure was invisible because the read-back rides the separate script
+ *  channel and saw a perfectly healthy page, so every mis-aimed click was
+ *  reported as a success. A zoom of exactly 1 is the identity — measured: at
+ *  factor 1 all three candidate laws hit — which is why this went unnoticed
+ *  until someone zoomed the app. */
+export function toInputPoint(point: DrivePointLike, factor: number): DrivePointLike {
   // A missing or nonsense factor means unzoomed rather than a poisoned point:
-  // dropping the input entirely would be a worse failure than not scaling it.
+  // sending NaN would put the click at an unpredictable spot, which is worse
+  // than not scaling it.
   const scale = Number.isFinite(factor) && factor > 0 ? factor : 1
 
-  return { x: Math.round(point.x / scale), y: Math.round(point.y / scale) }
+  return { x: Math.round(point.x * scale), y: Math.round(point.y * scale) }
 }
 
 /** Just the coordinate pair, so this module needn't import the drive types. */

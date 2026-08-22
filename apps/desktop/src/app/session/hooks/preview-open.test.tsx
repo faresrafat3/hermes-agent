@@ -142,6 +142,30 @@ describe('preview routing', () => {
       }
     })
 
+    // Fares's actual working pattern: the browser lives in the side pane, one
+    // session is told to work in it, and he switches to another chat while it
+    // runs. Keying the gate to the FOCUSED chat dropped every open from that
+    // point in silence while the tool still reported success, so the agent kept
+    // driving a pane that was showing the previous page. A session this window
+    // is streaming is not a hijack.
+    it('honors an open from a background session this window is streaming', async () => {
+      const { $sessionStates } = await import('@/store/session-states')
+      const states = $sessionStates.get()
+
+      // Focus is on another chat entirely.
+      $activeSessionId.set('some-other-runtime')
+      $sessionStates.set({ ...states, 'background-runtime': { busy: true } as never })
+      render(<Harness />)
+
+      try {
+        await emitPreviewOpen('/tmp/from-background.html', 'background-runtime')
+
+        await waitFor(() => expect($previewTarget.get()?.path).toBe('/tmp/from-background.html'))
+      } finally {
+        $sessionStates.set(states)
+      }
+    })
+
     it('opens a second target as its own tab rather than replacing the first', async () => {
       render(<Harness />)
 

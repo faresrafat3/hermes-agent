@@ -840,7 +840,6 @@ export function PreviewPane({ embedded = false, onRestartServer, reloadRequest =
     const onNavigate = (event: Event) => {
       const detail = event as Event & { url?: string }
 
-      // eslint-disable-next-line no-restricted-syntax -- navigation counter, deliberately non-reactive
       navGenerationRef.current += 1
 
       if (detail.url) {
@@ -886,7 +885,6 @@ export function PreviewPane({ embedded = false, onRestartServer, reloadRequest =
     // just triggered but which has not swapped the document yet — at re-read
     // time the old page is still there, so the URL alone still reads unchanged.
     const onStart = () => {
-      // eslint-disable-next-line no-restricted-syntax -- navigation counter, deliberately non-reactive
       navGenerationRef.current += 1
       setLoading(true)
     }

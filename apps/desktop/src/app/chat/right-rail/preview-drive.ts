@@ -14,7 +14,7 @@
  * steps over ~280ms is what Playwright's action cursor settles on too.
  */
 
-import { type PreviewInputHandle, toDeviceIndependent } from './preview-input'
+import { type PreviewInputHandle, toInputPoint } from './preview-input'
 
 export interface DrivePoint {
   x: number
@@ -64,7 +64,7 @@ const easeOut = (t: number) => 1 - Math.pow(1 - t, 3)
  *  the one boundary where a coordinate actually leaves for the guest, so no
  *  caller can forget it. */
 const wire = (input: PreviewInputHandle, point: DrivePoint): DrivePoint =>
-  toDeviceIndependent(point, input.zoom?.() ?? 1)
+  toInputPoint(point, input.zoom?.() ?? 1)
 
 /** Walk the pointer to `to`, letting the page hover everything on the way. */
 export async function glideTo(input: PreviewInputHandle, to: DrivePoint): Promise<void> {
@@ -72,6 +72,7 @@ export async function glideTo(input: PreviewInputHandle, to: DrivePoint): Promis
 
   for (let step = 1; step <= GLIDE_STEPS; step++) {
     const progress = easeOut(step / GLIDE_STEPS)
+
     const spot = wire(input, {
       x: from.x + (to.x - from.x) * progress,
       y: from.y + (to.y - from.y) * progress

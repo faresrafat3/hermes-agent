@@ -139,6 +139,10 @@ export type GatewayEventPayload = {
   amount?: number
   to?: string
   max?: number
+  // `elements` asking for the whole inventory rather than a delta. Declared
+  // here because the bridge forwards these fields one by one, so a field the
+  // data-bundle type does not carry is silently dropped on the wire.
+  full?: boolean
   // message.reaction (agent reacting via the react_to_message tool) — the
   // durable messages.id, that row's full reaction list after the write, and
   // the row's role so a live (not-yet-round-tripped) message can be matched.

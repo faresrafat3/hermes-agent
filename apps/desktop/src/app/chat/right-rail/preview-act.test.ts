@@ -450,7 +450,7 @@ describe('actOnActivePreview (drive_preview tool)', () => {
     expect(await actOnActivePreview({ kind: 'click', ref: '@e1' })).toMatchObject({ success: true })
   })
 
-  it('sends pointer input in device-independent pixels, not the guest’s CSS pixels', async () => {
+  it('sends pointer input scaled for the guest’s zoom, not the raw CSS point', async () => {
     const tabId = openBrowserTab()
     const send = vi.fn()
 
@@ -462,17 +462,15 @@ describe('actOnActivePreview (drive_preview tool)', () => {
           : JSON.stringify({ elements: [], hit: { onTarget: true, tag: 'A', trusted: true }, success: true })
       )
     )
-    cleanups.push(
-      registerPreviewInput(tabId, { focus: vi.fn(), send, zoom: () => 1.2220792770385742 })
-    )
+    cleanups.push(registerPreviewInput(tabId, { focus: vi.fn(), send, zoom: () => 1.2220792770385742 }))
 
     await actOnActivePreview({ kind: 'click', ref: 'lnk-t2' })
 
-    // Unconverted, this went out as (620, 130) and the guest resolved it to
-    // (507, 106) — the container, not the link.
+    // Measured law: css_received = dip_sent / factor. Sending the raw (620, 130)
+    // put the real click at CSS (507, 106) — the container, not the link.
     expect(send.mock.calls.map(([event]) => event).find(event => event.type === 'mouseDown')).toMatchObject({
-      x: 507,
-      y: 106
+      x: 758,
+      y: 159
     })
   })
 })
