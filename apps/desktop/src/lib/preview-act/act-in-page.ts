@@ -102,12 +102,29 @@ export function actInPageCore(
   const still = !!(win && win.matchMedia && win.matchMedia('(prefers-reduced-motion: reduce)').matches)
   const glide: ScrollBehavior = still ? 'auto' : 'smooth'
 
-  /** Walk the page and hand back what is interactable, in document order. The
-   *  handles are assigned afterwards, by `survey`. */
+  /** Walk the page and hand back what is interactable. Document order, except
+   *  that when the cap binds, what is ON SCREEN outranks what is not.
+   *
+   *  Plain document order truncates from the bottom, which sounds harmless and
+   *  is not: a page whose markup front-loads chrome (skip links, a mega-menu, a
+   *  cookie wall) can spend the whole budget before reaching the content the
+   *  user is looking at, and the agent is then told those controls do not
+   *  exist. Measured on github.com/NousResearch/hermes-agent: 122 entries, of
+   *  which the last ~35 were footer boilerplate (Terms, Privacy, Status, Manage
+   *  cookies, language percentages) — roughly 950 tokens for rows no task
+   *  needs, on a page whose real controls only just fit.
+   *
+   *  So the sweep collects two buckets and fills the answer from the on-screen
+   *  one first. Below-the-fold elements are still included — the agent scrolls
+   *  to them and needs their handles — they just yield first when something has
+   *  to be dropped. Handles are assigned afterwards, by `survey`. */
   const sight = (max: number) => {
     const nodes: Element[] = []
     const field: Element[] = []
     const elements: PreviewElement[] = []
+    // Second-class only in the sense that they lose a tie for the last slot.
+    const restNodes: Element[] = []
+    const restElements: PreviewElement[] = []
 
     const candidates = doc.querySelectorAll(
       'a[href], button, input:not([type="hidden"]), select, textarea, summary, label[for], ' +
@@ -118,7 +135,11 @@ export function actInPageCore(
     )
 
     for (const el of candidates) {
-      if (elements.length >= max && field.length >= maxMarks) {
+      // Both buckets full and nothing left to draw: there is no answer left to
+      // improve. `max` bounds what the agent is told about; the off-screen
+      // bucket is bounded by the same number because it can only ever be
+      // promoted into those same slots.
+      if (elements.length >= max && restElements.length >= max && field.length >= maxMarks) {
         break
       }
 
@@ -126,14 +147,16 @@ export function actInPageCore(
         continue
       }
 
+      const here = onScreen(el)
+
       // Drawable from here on. The two lists diverge deliberately: the field is
       // what is on screen to be outlined, the inventory is what the agent can
       // name and reach — which includes things below the fold it will scroll to.
-      if (field.length < maxMarks && onScreen(el)) {
+      if (field.length < maxMarks && here) {
         field.push(el)
       }
 
-      if (elements.length >= max) {
+      if (elements.length >= max && restElements.length >= max) {
         continue
       }
 
@@ -176,8 +199,21 @@ export function actInPageCore(
         entry.value = value
       }
 
-      nodes.push(el)
-      elements.push(entry)
+      const bucket = here ? elements : restElements
+      const bucketNodes = here ? nodes : restNodes
+
+      if (bucket.length < max) {
+        bucketNodes.push(el)
+        bucket.push(entry)
+      }
+    }
+
+    // Top up with off-screen entries, in document order, until the cap is met.
+    // On a page that fits, this is every one of them and the answer is exactly
+    // what document order would have produced.
+    for (let i = 0; i < restElements.length && elements.length < max; i++) {
+      nodes.push(restNodes[i])
+      elements.push(restElements[i])
     }
 
     holder.nodes = nodes

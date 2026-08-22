@@ -728,3 +728,91 @@ describe('scroll', () => {
     expect(result.acted).toContain('Results')
   })
 })
+
+/** Lay the document out so `top` is honoured, which is what decides whether an
+ *  element is on screen. The default harness parks everything at top: 0, i.e.
+ *  all on screen, so an ordering test needs its own layout. */
+function layOutWithTops() {
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    const style = getComputedStyle(this)
+    const width = style.display === 'none' ? 0 : parseFloat(style.width) || 40
+    const height = style.display === 'none' ? 0 : parseFloat(style.height) || 40
+    const top = parseFloat(style.top) || 0
+
+    return { bottom: top + height, height, left: 0, right: width, top, width, x: 0, y: top } as DOMRect
+  })
+}
+
+/**
+ * Document order truncates from the bottom, which loses the wrong rows. A page
+ * whose markup front-loads chrome — skip links, a mega-menu, a cookie wall —
+ * can spend the whole cap before reaching the controls the user is looking at,
+ * and the agent is then told they do not exist. Measured on
+ * github.com/NousResearch/hermes-agent: 122 entries, the last ~35 of them footer
+ * boilerplate (Terms, Privacy, Status, Manage cookies, language percentages),
+ * about 950 tokens of rows no task needs, on a page whose real controls only
+ * just fit.
+ *
+ * So when the cap binds, on-screen wins. Below-the-fold elements are still
+ * inventoried — the agent scrolls to them — they just yield the last slot.
+ */
+describe('inventory cap', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    layOutWithTops()
+    // The viewport the layout above is measured against.
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
+  })
+
+  it('keeps the on-screen control when the cap is spent on chrome above it', () => {
+    // Two footer links come FIRST in the markup, the real button last and on
+    // screen. Under document order the cap of 2 would answer with the footer.
+    const holder = page(`
+      <a href="#terms" style="top: 4000px">Terms</a>
+      <a href="#privacy" style="top: 4100px">Privacy</a>
+      <button style="top: 200px">Save invoice</button>
+    `)
+
+    const labels = actInPage(document, holder, { kind: 'elements', max: 2 }).elements!.map(e => e.label)
+
+    expect(labels).toContain('Save invoice')
+    expect(labels).toHaveLength(2)
+  })
+
+  it('still includes below-the-fold elements when there is room', () => {
+    // The whole point of the inventory: the agent must be able to name things
+    // it will scroll to. Preference only decides who loses the LAST slot.
+    const holder = page(`
+      <button style="top: 100px">Visible</button>
+      <a href="#deep" style="top: 5000px">Deep link</a>
+    `)
+
+    const labels = inventory(holder).elements!.map(e => e.label)
+
+    expect(labels).toContain('Visible')
+    expect(labels).toContain('Deep link')
+  })
+
+  it('keeps document order among the elements it returns', () => {
+    // Preference must not reshuffle a page that fits: the agent reads the
+    // inventory as the page's own order, and a stable order keeps handles
+    // legible across calls.
+    const holder = page(`
+      <button style="top: 100px">First</button>
+      <button style="top: 200px">Second</button>
+      <button style="top: 300px">Third</button>
+    `)
+
+    expect(inventory(holder).elements!.map(e => e.label)).toEqual(['First', 'Second', 'Third'])
+  })
+
+  it('answers with off-screen elements when nothing is on screen', () => {
+    // A page scrolled past its own controls still has to be addressable.
+    const holder = page(`
+      <button style="top: 3000px">Far one</button>
+      <button style="top: 3100px">Far two</button>
+    `)
+
+    expect(inventory(holder).elements!.map(e => e.label)).toEqual(['Far one', 'Far two'])
+  })
+})
