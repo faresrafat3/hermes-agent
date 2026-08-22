@@ -14,7 +14,7 @@
  * steps over ~280ms is what Playwright's action cursor settles on too.
  */
 
-import type { PreviewInputHandle } from './preview-input'
+import { type PreviewInputHandle, toDeviceIndependent } from './preview-input'
 
 export interface DrivePoint {
   x: number
@@ -58,18 +58,26 @@ const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 /** Decelerating, like a hand arriving at a target rather than a linear sweep. */
 const easeOut = (t: number) => 1 - Math.pow(1 - t, 3)
 
+/** The pointer is tracked in the same units the act engine measures in — guest
+ *  CSS pixels — because that is what every caller reasons about. The conversion
+ *  to the device-independent pixels `sendInputEvent` expects happens here, at
+ *  the one boundary where a coordinate actually leaves for the guest, so no
+ *  caller can forget it. */
+const wire = (input: PreviewInputHandle, point: DrivePoint): DrivePoint =>
+  toDeviceIndependent(point, input.zoom?.() ?? 1)
+
 /** Walk the pointer to `to`, letting the page hover everything on the way. */
 export async function glideTo(input: PreviewInputHandle, to: DrivePoint): Promise<void> {
   const from = pointer
 
   for (let step = 1; step <= GLIDE_STEPS; step++) {
     const progress = easeOut(step / GLIDE_STEPS)
-
-    input.send({
-      type: 'mouseMove',
-      x: Math.round(from.x + (to.x - from.x) * progress),
-      y: Math.round(from.y + (to.y - from.y) * progress)
+    const spot = wire(input, {
+      x: from.x + (to.x - from.x) * progress,
+      y: from.y + (to.y - from.y) * progress
     })
+
+    input.send({ type: 'mouseMove', x: spot.x, y: spot.y })
     await wait(GLIDE_MS / GLIDE_STEPS)
   }
 
@@ -80,9 +88,11 @@ export async function glideTo(input: PreviewInputHandle, to: DrivePoint): Promis
 /** Press and release at the pointer's current spot. `clicks` of 3 selects the
  *  text under it, which is how a field gets cleared without a modifier key. */
 export async function clickAt(input: PreviewInputHandle, clicks = 1): Promise<void> {
+  const spot = wire(input, pointer)
+
   for (let click = 1; click <= clicks; click++) {
-    input.send({ button: 'left', clickCount: click, type: 'mouseDown', x: pointer.x, y: pointer.y })
-    input.send({ button: 'left', clickCount: click, type: 'mouseUp', x: pointer.x, y: pointer.y })
+    input.send({ button: 'left', clickCount: click, type: 'mouseDown', x: spot.x, y: spot.y })
+    input.send({ button: 'left', clickCount: click, type: 'mouseUp', x: spot.x, y: spot.y })
     await wait(KEY_MS)
   }
 }
@@ -92,6 +102,7 @@ export async function clickAt(input: PreviewInputHandle, clicks = 1): Promise<vo
  *  moves the content down, i.e. scrolls UP — so it is the inverse of the number
  *  a caller asks for, and of DOM `WheelEvent.deltaY`. */
 export async function wheelBy(input: PreviewInputHandle, down: number): Promise<void> {
+  const spot = wire(input, pointer)
   let sent = 0
 
   for (let step = 1; step <= WHEEL_STEPS; step++) {
@@ -101,7 +112,7 @@ export async function wheelBy(input: PreviewInputHandle, down: number): Promise<
     sent = so_far
 
     if (notch) {
-      input.send({ deltaX: 0, deltaY: -notch, type: 'mouseWheel', x: pointer.x, y: pointer.y })
+      input.send({ deltaX: 0, deltaY: -notch, type: 'mouseWheel', x: spot.x, y: spot.y })
     }
 
     await wait(WHEEL_MS / WHEEL_STEPS)

@@ -32,11 +32,11 @@ import { watchInPage } from '@/lib/preview-act/watch-in-page'
 
 import { clickAt, glideTo, pointerPlaced, pressKey, selectAll, typeText, wheelBy } from './preview-drive'
 import { activePreviewInput, type PreviewInputHandle } from './preview-input'
-import { activePreviewNav, type PreviewNavHandle } from './preview-nav'
+import { activePreviewNav, type PreviewDocState, type PreviewNavCommand } from './preview-nav'
 import { activePreviewScriptRunner, type PreviewScriptRunner } from './preview-script-runner'
 
 /** Verbs the pane owns; a guest page cannot drive its own history. */
-const NAV_ACTIONS: readonly (keyof PreviewNavHandle)[] = ['back', 'forward', 'reload']
+const NAV_ACTIONS: readonly PreviewNavCommand[] = ['back', 'forward', 'reload']
 
 /** How long a click/type is given to land before the page is re-inventoried.
  *  Long enough for a framework re-render, short enough not to stall the turn.
@@ -65,6 +65,56 @@ const NOTHING_OPEN = 'No live page is open in the in-app browser — open one wi
 
 const NAVIGATED =
   'The page stopped answering right after — it is probably navigating. Call elements to see where you landed.'
+
+/** Watches the pane's document across one action.
+ *
+ *  The read-back an action does on its way out runs on the script channel, which
+ *  answers from whichever document is loaded AT THAT MOMENT. A click or a form
+ *  submit that starts a navigation is therefore read back off the OLD page: the
+ *  engine sees the same URL it saw before, matches every handle, and answers
+ *  `{ delta: { same: N } }` — the agent is told, with `success: true`, that its
+ *  click changed nothing, when in fact the page it wanted is on its way in.
+ *  Measured live: a search submit that landed on the results page reported the
+ *  home page's URL and `same: 115`; a link click that navigated reported
+ *  `same: 1`.
+ *
+ *  So the inventory in that answer is not just stale, it is about to be wrong,
+ *  and every ref in it belongs to a document that is being torn down. Rather
+ *  than hand that to the agent, `settled` reports the navigation and drops the
+ *  snapshot, which is the one thing the agent can act on correctly. */
+function watchDocument(): { moved: () => PreviewDocState | null } {
+  const read = () => activePreviewNav()?.doc?.() ?? null
+  const before = read()
+
+  return {
+    // Null when nothing moved, or when the pane cannot report — an unknown
+    // answer must not be dressed up as a confirmed navigation.
+    moved: () => {
+      const after = read()
+
+      if (!before || !after) {
+        return null
+      }
+
+      return after.generation !== before.generation || after.url !== before.url ? after : null
+    }
+  }
+}
+
+/** Strip a snapshot that belongs to a document the page is leaving, and say so.
+ *  The agent's next `elements` call is what re-establishes refs, and the note
+ *  tells it to make that call instead of trusting what it was just handed. */
+function afterNavigation(result: PreviewActResult, landed: PreviewDocState): PreviewActResult {
+  const { delta: _delta, elements: _elements, ...kept } = result
+
+  return {
+    ...kept,
+    note: 'The page navigated. Every ref from the old page is retired — call elements for the new one.',
+    // The URL the pane reports is the document being committed, which is a
+    // truer answer than the one the old page gave on its way out.
+    url: landed.url || kept.url
+  }
+}
 
 /** A fingerprint of the overlay's source, so the guest page can tell that the
  *  code it is running has changed underneath it.
@@ -148,7 +198,21 @@ ${preamble()}
   // ignored, and the agent would report success either way.
   w.__hermesHit = null;
   document.addEventListener('pointerdown', function (e) {
-    w.__hermesHit = { tag: e.target ? e.target.tagName : '?', trusted: e.isTrusted === true };
+    // holder.aimed is the element the locate trip just resolved. Recording
+    // whether the real pointer landed on it (or inside it) separates "the input
+    // reached the page" from "the input reached the TARGET" -- a click that is
+    // off by a scale factor still reaches the page, hits the container, and
+    // without this looks exactly like a successful click.
+    var want = holder.aimed || null;
+    var got = e.target || null;
+    var onTarget = !!(want && got && (want === got || (want.contains && want.contains(got)) || (got.contains && got.contains(want))));
+    w.__hermesHit = {
+      onTarget: onTarget,
+      tag: got ? got.tagName : '?',
+      trusted: e.isTrusted === true,
+      // Named so a mis-aimed click can say what it hit instead of the target.
+      what: got ? (got.id ? '#' + got.id : String(got.tagName || '').toLowerCase()) : '?'
+    };
   }, { capture: true, once: true });
   // Measure again once the scroll has stopped: real input is aimed at a fixed
   // viewport coordinate, so it has to be where the target ENDS UP.
@@ -360,6 +424,11 @@ async function driveAction(
 
   await glideTo(input, found.point)
 
+  // Armed here rather than at entry: the glide above can take a couple of
+  // frames, and a navigation still in flight from a PREVIOUS action would
+  // otherwise be counted against this one.
+  const watch = watchDocument()
+
   if (action.kind === 'click') {
     await clickAt(input)
   } else if (action.kind === 'type') {
@@ -399,7 +468,7 @@ async function driveAction(
     return { acted, note: NAVIGATED, success: true }
   }
 
-  const { hit, ...result } = after.result as PreviewActResult & { hit?: { tag: string; trusted: boolean } | null }
+  const { hit, ...result } = after.result as PreviewActResult & { hit?: PreviewHit | null }
 
   // The witness the locate trip armed. No record means the input never reached
   // the document, which the agent must hear about — every other signal here
@@ -412,12 +481,51 @@ async function driveAction(
     }
   }
 
+  // A navigation the action started makes the read-back above a snapshot of the
+  // OUTGOING document, so it is dropped rather than passed off as current.
+  const landed = watch.moved()
+
+  if (landed) {
+    return afterNavigation({ ...result, acted, success: true }, landed)
+  }
+
+  // Reached the page but not the TARGET. Distinct from "never arrived" and from
+  // success: the coordinate was wrong, so the agent must not believe the verb
+  // happened. The overlay case keeps its own wording — that is our own chrome in
+  // the way, not a mis-aimed pointer.
+  const missed = hit && hit.onTarget === false && CLICKS.indexOf(action.kind) !== -1
+
+  if (missed && hit.tag !== 'HERMES-WATCH') {
+    return {
+      ...result,
+      error:
+        'The pointer landed on ' +
+        (hit.what || 'something else') +
+        ' instead of ' +
+        (target || 'the target') +
+        ', so nothing was ' +
+        acted.split(' ')[0] +
+        '. Call elements again for where things really are.',
+      success: false
+    }
+  }
+
   return { ...result, acted, note: hitNote(hit), success: true }
+}
+
+/** The page's own record of the real pointer that arrived. */
+interface PreviewHit {
+  /** Whether it landed on the element the locate trip aimed at. */
+  onTarget?: boolean
+  tag: string
+  trusted: boolean
+  /** What it actually hit, for a mis-aim to name. */
+  what?: string
 }
 
 /** Flag a click the overlay intercepted, which would otherwise look like a page
  *  that simply ignored it. */
-function hitNote(hit?: { tag: string; trusted: boolean } | null): string | undefined {
+function hitNote(hit?: PreviewHit | null): string | undefined {
   return hit && hit.tag === 'HERMES-WATCH' ? 'The action overlay intercepted the click instead of the page.' : undefined
 }
 
@@ -470,12 +578,22 @@ async function driveScroll(
     await glideTo(input, anchor.point)
   }
 
+  const watch = watchDocument()
+
   await wheelBy(input, action.amount ?? anchor.page ?? 600)
 
   const after = await runJson(run, buildFinishScript(SETTLE_MS))
 
   if (after.kind !== 'answered') {
     return { acted: 'scrolled the page', note: NAVIGATED, success: true }
+  }
+
+  // Rare but real: a scroll that trips an infinite-scroll router, or lands on a
+  // page that redirects. The inventory would belong to the outgoing document.
+  const landed = watch.moved()
+
+  if (landed) {
+    return afterNavigation({ ...after.result, acted: 'scrolled the page', success: true }, landed)
   }
 
   return { ...after.result, acted: 'scrolled the page', success: true }
@@ -547,6 +665,10 @@ export async function actOnActivePreview(
   }
 
   const settle = typed.kind === 'elements' ? 0 : SETTLE_MS
+  // An `elements` call touches nothing, so it cannot navigate; every other verb
+  // on this path (a click on a pane with no real input channel, a `to` scroll)
+  // can, and its read-back would come off the outgoing document.
+  const watch = typed.kind === 'elements' ? null : watchDocument()
   const scripted = await runJson(run, buildScriptedScript(typed, settle))
 
   if (scripted.kind === 'failed') {
@@ -555,7 +677,13 @@ export async function actOnActivePreview(
 
   // The action almost certainly landed — a page that stops answering right
   // after a click is one that navigated. Say so instead of failing it.
-  return scripted.kind === 'silent' ? { acted: typed.kind, note: NAVIGATED, success: true } : scripted.result
+  if (scripted.kind === 'silent') {
+    return { acted: typed.kind, note: NAVIGATED, success: true }
+  }
+
+  const landed = watch?.moved()
+
+  return landed ? afterNavigation(scripted.result, landed) : scripted.result
 }
 
 // Self-accept so an edit here, or to the in-page sources this module

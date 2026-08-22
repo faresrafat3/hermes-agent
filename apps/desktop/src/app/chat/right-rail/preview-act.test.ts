@@ -313,4 +313,166 @@ describe('actOnActivePreview (drive_preview tool)', () => {
   it('reports history verbs with no pane to drive', async () => {
     expect((await actOnActivePreview({ kind: 'reload' })).error).toContain('open_preview')
   })
+
+  /** A pane whose document moves the moment the click lands, the way a link or a
+   *  form submit does. `doc` is what the real pane publishes off its webview. */
+  const withNavigatingPane = ({ nav = true }: { nav?: boolean } = {}) => {
+    const tabId = openBrowserTab()
+    let generation = 0
+
+    cleanups.push(
+      registerPreviewScriptRunner(tabId, async code => {
+        if (code.includes('"kind":"locate"')) {
+          return JSON.stringify({ acted: 'looking at a "Learn more"', point: { x: 120, y: 80 }, success: true })
+        }
+
+        // The read-back runs on the OUTGOING document: same url, every handle
+        // still matched. This is exactly the shape measured live.
+        return JSON.stringify({
+          delta: { same: 115 },
+          hit: { onTarget: true, tag: 'A', trusted: true, what: '#more' },
+          success: true,
+          title: 'Old Page',
+          url: 'https://example.com/'
+        })
+      })
+    )
+    cleanups.push(
+      registerPreviewInput(tabId, {
+        focus: vi.fn(),
+        send: () => {
+          // The click starts a navigation: the pane sees did-start-loading.
+          if (nav) {
+            generation += 1
+          }
+        }
+      })
+    )
+    cleanups.push(
+      registerPreviewNav(tabId, {
+        back: vi.fn(),
+        doc: () => ({ generation, url: generation ? 'https://www.iana.org/help/example-domains' : 'https://example.com/' }),
+        forward: vi.fn(),
+        reload: vi.fn()
+      })
+    )
+  }
+
+  // Measured live before the fix: a search submit that really did land on the
+  // results page answered with the home page's url and `delta: {same: 115}`, and
+  // a link click that navigated answered `{same: 1}`. Both said success, so the
+  // agent concluded its click had done nothing and retried or gave up.
+  it('does not pass off the outgoing document as the current page', async () => {
+    withNavigatingPane()
+
+    const result = await actOnActivePreview({ kind: 'click', ref: 'lnk-learn-more' })
+
+    expect(result.success).toBe(true)
+    // The stale snapshot is dropped rather than handed over: every ref in it
+    // belongs to a document being torn down.
+    expect(result.delta).toBeUndefined()
+    expect(result.elements).toBeUndefined()
+    expect(result.note).toContain('navigated')
+    // And the url is the document actually being committed.
+    expect(result.url).toBe('https://www.iana.org/help/example-domains')
+  })
+
+  it('still returns the inventory when the page did not move', async () => {
+    withNavigatingPane({ nav: false })
+
+    const result = await actOnActivePreview({ kind: 'click', ref: 'lnk-learn-more' })
+
+    // The delta is the whole point of the cheap path — it must survive a click
+    // that genuinely changed nothing but the page's own state.
+    expect(result.delta).toEqual({ same: 115 })
+    expect(result.note).toBeUndefined()
+    expect(result.url).toBe('https://example.com/')
+  })
+
+  // A pane too old to publish `doc` must keep working: an unknown answer is not
+  // a confirmed navigation, so the snapshot is still the best thing we have.
+  it('keeps the snapshot when the pane cannot report its document', async () => {
+    const tabId = openBrowserTab()
+
+    cleanups.push(
+      registerPreviewScriptRunner(tabId, async code =>
+        code.includes('"kind":"locate"')
+          ? JSON.stringify({ acted: 'looking at button "Save"', point: { x: 12, y: 8 }, success: true })
+          : JSON.stringify({ delta: { same: 3 }, hit: { onTarget: true, tag: 'BUTTON', trusted: true }, success: true })
+      )
+    )
+    cleanups.push(registerPreviewInput(tabId, { focus: vi.fn(), send: vi.fn() }))
+    cleanups.push(registerPreviewNav(tabId, { back: vi.fn(), forward: vi.fn(), reload: vi.fn() }))
+
+    expect((await actOnActivePreview({ kind: 'click', ref: '@e1' })).delta).toEqual({ same: 3 })
+  })
+
+  // The coordinate bug's signature: real input arrives, but on the wrong node.
+  // The old witness only asked "did anything arrive", so a click that missed by
+  // a scale factor was indistinguishable from one that hit.
+  it('fails when the pointer reaches the page but lands on the wrong element', async () => {
+    const tabId = openBrowserTab()
+
+    cleanups.push(
+      registerPreviewScriptRunner(tabId, async code =>
+        code.includes('"kind":"locate"')
+          ? JSON.stringify({ acted: 'looking at a "T2"', point: { x: 620, y: 130 }, success: true })
+          : JSON.stringify({
+              elements: [],
+              hit: { onTarget: false, tag: 'DIV', trusted: true, what: '#pad' },
+              success: true
+            })
+      )
+    )
+    cleanups.push(registerPreviewInput(tabId, { focus: vi.fn(), send: vi.fn() }))
+
+    const result = await actOnActivePreview({ kind: 'click', ref: 'lnk-t2' })
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('#pad')
+    expect(result.error).toContain('T2')
+  })
+
+  // A witness with no verdict (an older engine still parked on a long-lived
+  // page) must not be read as a miss — that would fail every healthy click.
+  it('treats a witness without a verdict as a hit', async () => {
+    const tabId = openBrowserTab()
+
+    cleanups.push(
+      registerPreviewScriptRunner(tabId, async code =>
+        code.includes('"kind":"locate"')
+          ? JSON.stringify({ acted: 'looking at button "Save"', point: { x: 12, y: 8 }, success: true })
+          : JSON.stringify({ elements: [], hit: { tag: 'BUTTON', trusted: true }, success: true })
+      )
+    )
+    cleanups.push(registerPreviewInput(tabId, { focus: vi.fn(), send: vi.fn() }))
+
+    expect(await actOnActivePreview({ kind: 'click', ref: '@e1' })).toMatchObject({ success: true })
+  })
+
+  it('sends pointer input in device-independent pixels, not the guest’s CSS pixels', async () => {
+    const tabId = openBrowserTab()
+    const send = vi.fn()
+
+    cleanups.push(
+      registerPreviewScriptRunner(tabId, async code =>
+        code.includes('"kind":"locate"')
+          ? // What getBoundingClientRect reports: CSS pixels inside the page.
+            JSON.stringify({ acted: 'looking at a "T2"', point: { x: 620, y: 130 }, success: true })
+          : JSON.stringify({ elements: [], hit: { onTarget: true, tag: 'A', trusted: true }, success: true })
+      )
+    )
+    cleanups.push(
+      registerPreviewInput(tabId, { focus: vi.fn(), send, zoom: () => 1.2220792770385742 })
+    )
+
+    await actOnActivePreview({ kind: 'click', ref: 'lnk-t2' })
+
+    // Unconverted, this went out as (620, 130) and the guest resolved it to
+    // (507, 106) — the container, not the link.
+    expect(send.mock.calls.map(([event]) => event).find(event => event.type === 'mouseDown')).toMatchObject({
+      x: 507,
+      y: 106
+    })
+  })
 })

@@ -56,6 +56,10 @@ type PreviewWebview = HTMLElement & {
   getTitle?: () => string
   getURL?: () => string
   getWebContentsId?: () => number
+  /** The GUEST's zoom factor (1 = 100%). Guest CSS pixels per
+   *  device-independent pixel, so it converts a measured rect into the units
+   *  `sendInputEvent` takes. */
+  getZoomFactor?: () => number
   goBack?: () => void
   goForward?: () => void
   inspectElement?: (x: number, y: number) => void
@@ -230,6 +234,11 @@ export function PreviewPane({ embedded = false, onRestartServer, reloadRequest =
   const hostRef = useRef<HTMLDivElement | null>(null)
   const lastReloadRequestRef = useRef(reloadRequest)
   const lastRestartEventRef = useRef('')
+  // Bumped on every load start and every commit, so the agent's act layer can
+  // tell "the page is quiet" from "the page is moving under me" — a click that
+  // starts a navigation must never be reported as a page that did not change.
+  // A ref, not state: it is read at action boundaries and must never repaint.
+  const navGenerationRef = useRef(0)
   const previewContentRef = useRef<HTMLDivElement | null>(null)
   const webviewRef = useRef<PreviewWebview | null>(null)
   const previewServerRestart = useStore($previewServerRestart)
@@ -482,7 +491,18 @@ export function PreviewPane({ embedded = false, onRestartServer, reloadRequest =
       return
     }
 
-    return registerPreviewNav(tabId, { back: goBack, forward: goForward, reload: reloadPreview })
+    return registerPreviewNav(tabId, {
+      back: goBack,
+      // Read straight off the webview rather than from React state: the act
+      // layer samples this either side of one action, and a state update that
+      // has not flushed yet would make a navigation look like a quiet page.
+      doc: () => ({
+        generation: navGenerationRef.current,
+        url: webviewRef.current?.getURL?.() ?? ''
+      }),
+      forward: goForward,
+      reload: reloadPreview
+    })
   }, [goBack, goForward, isRemoteHtml, isWebPreview, reloadPreview, tabId])
 
   // Publish the PAGE reader for this tab (the read_preview tool): extract the
@@ -551,7 +571,12 @@ export function PreviewPane({ embedded = false, onRestartServer, reloadRequest =
         }
 
         webview.sendInputEvent(event)
-      }
+      },
+      // Read live rather than captured: the user can zoom mid-task, and a stale
+      // factor aims every subsequent click at the wrong place. The GUEST's own
+      // factor is the one that matters — it is what scales the CSS pixels the
+      // act engine measured — so ask the webview, not the host window.
+      zoom: () => webviewRef.current?.getZoomFactor?.() ?? 1
     })
   }, [isRemoteHtml, isWebPreview, tabId])
 
@@ -815,6 +840,9 @@ export function PreviewPane({ embedded = false, onRestartServer, reloadRequest =
     const onNavigate = (event: Event) => {
       const detail = event as Event & { url?: string }
 
+      // eslint-disable-next-line no-restricted-syntax -- navigation counter, deliberately non-reactive
+      navGenerationRef.current += 1
+
       if (detail.url) {
         setLoadError(null)
         setCurrentUrl(detail.url)
@@ -854,7 +882,14 @@ export function PreviewPane({ embedded = false, onRestartServer, reloadRequest =
       setLoading(false)
     }
 
-    const onStart = () => setLoading(true)
+    // A load STARTING is the signal that catches a navigation the agent's click
+    // just triggered but which has not swapped the document yet — at re-read
+    // time the old page is still there, so the URL alone still reads unchanged.
+    const onStart = () => {
+      // eslint-disable-next-line no-restricted-syntax -- navigation counter, deliberately non-reactive
+      navGenerationRef.current += 1
+      setLoading(true)
+    }
 
     const onStop = () => {
       setLoading(false)

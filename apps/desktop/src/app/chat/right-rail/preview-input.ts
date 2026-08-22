@@ -31,6 +31,37 @@ export interface PreviewInputHandle {
   /** Give the guest keyboard focus, so key events reach its active element. */
   focus: () => void
   send: (event: PreviewInputEvent) => void
+  /** Guest CSS pixels per device-independent pixel (the guest's zoom factor),
+   *  read live at send time. Absent on a pane that cannot report it, which the
+   *  conversion treats as unzoomed. */
+  zoom?: () => number
+}
+
+/** Guest CSS pixels per device-independent pixel — the guest's zoom factor.
+ *
+ *  The act engine measures targets with `getBoundingClientRect`, which is CSS
+ *  pixels INSIDE the zoomed page, but `sendInputEvent` is a browser-level input
+ *  channel and takes device-independent pixels. At any zoom but 100% those two
+ *  units differ, so an unconverted point lands at `1/factor` of where the agent
+ *  aimed: measured live at zoom 1.222, a click aimed at (620, 130) arrived at
+ *  (507, 106) and hit the container instead of the link. Every click, type and
+ *  wheel was landing in the wrong place, and the failure was invisible because
+ *  the read-back rode the separate script channel and still reported success.
+ *
+ *  A zoom of exactly 1 (the default) is the identity, which is why this went
+ *  unnoticed until someone zoomed the app. */
+export function toDeviceIndependent(point: DrivePointLike, factor: number): DrivePointLike {
+  // A missing or nonsense factor means unzoomed rather than a poisoned point:
+  // dropping the input entirely would be a worse failure than not scaling it.
+  const scale = Number.isFinite(factor) && factor > 0 ? factor : 1
+
+  return { x: Math.round(point.x / scale), y: Math.round(point.y / scale) }
+}
+
+/** Just the coordinate pair, so this module needn't import the drive types. */
+export interface DrivePointLike {
+  x: number
+  y: number
 }
 
 const handles = new Map<string, PreviewInputHandle>()
