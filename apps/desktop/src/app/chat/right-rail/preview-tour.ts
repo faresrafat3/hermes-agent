@@ -49,6 +49,21 @@ function buildTourScript(action: TourAction): string {
 })()`
 }
 
+/** Cap on one round trip into the guest page.
+ *
+ *  A tour action can start a navigation — `next` onto a step whose highlight is
+ *  a link the page then follows, or a guest that redirects mid-walk — and that
+ *  tears the document down while the injected script is still in flight. The
+ *  promise `executeJavaScript` returned then never settles: not resolved, not
+ *  rejected, so the surrounding try/catch never fires either. Without this the
+ *  tool sits on it for the bridge's full 45s deadline (`_TOUR_TIMEOUT_S`) and
+ *  the turn stalls on what was usually a successful step.
+ *
+ *  Same reasoning and roughly the same budget as the act engine's
+ *  ACT_TIMEOUT_MS; a tour step is allowed a little longer because driver.js
+ *  animates its stage into place before answering. */
+const TOUR_TIMEOUT_MS = 10_000
+
 /** Run one tour action in the ACTIVE preview tab's page. */
 export async function runPreviewTour(action: TourAction): Promise<TourResult> {
   const run = activePreviewScriptRunner()
@@ -57,7 +72,26 @@ export async function runPreviewTour(action: TourAction): Promise<TourResult> {
     return { error: 'No live page is open in the preview pane — open one first.', success: false }
   }
 
-  const raw = await run(buildTourScript(action))
+  // A rejection is folded in rather than thrown so the timeout below is the only
+  // way out that is not an answer: the caller distinguishes "the page refused"
+  // from "the page went quiet", and both beat an unsettled promise.
+  const raw = await Promise.race([
+    run(buildTourScript(action)).catch((error: unknown) => new Error(String(error))),
+    new Promise<undefined>(resolve => setTimeout(resolve, TOUR_TIMEOUT_MS))
+  ])
+
+  if (raw === undefined) {
+    // Reported as a success: the action was delivered and most likely ran, and
+    // the page going quiet mid-tour is a navigation, not a failed step.
+    return {
+      hint: 'The page stopped answering — it is probably navigating, which resets the tour. Call targets to see where you landed.',
+      success: true
+    }
+  }
+
+  if (raw instanceof Error) {
+    return { error: 'The page rejected the tour action: ' + raw.message, success: false }
+  }
 
   if (typeof raw !== 'string' || !raw) {
     return { error: 'The page did not answer the tour action.', success: false }
