@@ -206,6 +206,65 @@ messaging, and cron sessions.
 | `react_to_message` | React to a message with a single emoji, iMessage-tapback style. Opt-in via Settings → Appearance (`display.message_reactions`). | — |
 | `tour` | Give a live guided tour: dim the screen, highlight an element, and attach a narrated popover (driver.js). Works on the Hermes app's own UI and on any page open in the preview pane; `targets` discovers what's on screen, `show` narrates step-by-step, `start` hands the user Next/Prev controls. | — |
 
+### Driving the in-app browser
+
+`drive_preview` reads and acts on whatever page is open in the preview pane. The
+pane is **window-scoped**, not session-scoped: leave the browser open beside the
+chat, ask one session to work in it, and switching to another conversation while
+it runs does not interrupt it.
+
+**Start with `elements`.** It returns an inventory of everything clickable and
+typable, each under a ref that names what it is (`btn-sign-in`, `inp-email`,
+`lnk-learn-more`). Address elements by that ref rather than by a CSS selector:
+refs survive a framework re-render that destroys and rebuilds the element, and
+only a navigation retires them.
+
+After the first look, every action answers with a **delta** instead of the whole
+inventory — `added` in full, `changed` carrying only the fields that moved,
+`removed` and `rebound` as bare ref lists, and `same` counting the refs that
+held. A `rebound` ref needs no action; the page rebuilt that element and the ref
+already follows it. Nothing mentioned means nothing changed, so there is no need
+to re-read the page to check.
+
+Input is **real Chromium input**, not scripted events: the pointer travels to its
+target, `:hover` matches, hover-only menus open, and the page cannot tell the
+agent apart from a person. That is also why the tool insists on being honest
+about failure — see below.
+
+#### Reading the answer
+
+The three outcomes are deliberately distinct, because the expensive mistake is an
+agent that believes an action landed when it did not:
+
+| Answer | Meaning | What to do |
+|---|---|---|
+| `success: true` with a delta or inventory | The action landed and the page is quiet. | Carry on; the snapshot is current. |
+| `success: true` with `note: "The page navigated…"` | The action worked and started a navigation. The inventory is deliberately **dropped**, because it would describe the document being torn down. | Call `elements` for the new page; old refs are retired. |
+| `success: false` naming what was hit | Real input arrived but landed on the wrong element, or never reached the page at all. | Call `elements` again — the page moved under the aim. |
+
+The pane draws each move as it happens so the user can follow along. Those cues
+fade on their own; `annotate_preview` is how a mark is left up on purpose.
+
+#### Inventory size
+
+The inventory is capped (120 entries). When the cap binds, elements **on screen
+outrank those off screen**, so a page that front-loads chrome — skip links, a
+mega-menu, a cookie wall — cannot spend the whole budget before reaching the
+controls the user is looking at. Below-the-fold elements are still listed (the
+agent scrolls to them and needs their handles); they only yield the last slot.
+Pass `max` to ask for fewer, or `full: true` to re-read the whole inventory
+instead of a delta after losing track of a page.
+
+#### One caveat worth knowing
+
+Agent input goes to the webview element directly, so it never moves the real
+mouse cursor or steals keyboard focus — working in another window (or another app
+entirely) does not disturb a run. The reverse is not true: if the **preview pane
+itself** holds focus in the Hermes window and the user types, those keystrokes
+land in the page the agent is driving, because it is a live browser and the user
+is genuinely typing into it. Click back into the chat before typing if a run is
+in flight.
+
 ### Tours
 
 The `tour` tool discovers its own targets — call `action='targets'` and it returns every addressable element on screen with a selector, a label, and a `stable` flag. Stable selectors key off identity (`data-tour`, `id`, `data-testid`, `aria-label`) and survive a re-render; positional `nth-child` paths don't, so stable ones sort first and should be preferred.
