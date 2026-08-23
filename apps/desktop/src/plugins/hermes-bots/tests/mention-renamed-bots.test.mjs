@@ -39,6 +39,8 @@ function runtime({ meta } = {}) {
     .replace(/^import .* from 'react'\r?\n/m, '')
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
+    .replace(/^export const GROUP_CHAT_MAX_MEMBERS/m, 'const GROUP_CHAT_MAX_MEMBERS')
+    .replace(/^export const groupChatMaxRoundsFor/m, 'const groupChatMaxRoundsFor')
     .concat(
       '\nglobalThis.__x = { mentionNameForms, botFriendlyNames, botMentionTag, resolveRosterMentions, parseGroupChatMentions, groupMemberKey, durableGroupChatMembers, $botMeta };\n'
     )
@@ -159,6 +161,8 @@ test('composer autocomplete offers the renamed tag and matches on the display na
     .replace(/^import .* from 'react'\r?\n/m, '')
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
+    .replace(/^export const GROUP_CHAT_MAX_MEMBERS/m, 'const GROUP_CHAT_MAX_MEMBERS')
+    .replace(/^export const groupChatMaxRoundsFor/m, 'const groupChatMaxRoundsFor')
     .concat('\nglobalThis.__botMeta = $botMeta;')
   vm.runInNewContext(code, context)
   context.__botMeta.set({ writer: { title: 'Research Buddy' } })

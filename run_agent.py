@@ -4340,15 +4340,29 @@ class AIAgent:
     def _credits_notices_enabled(self) -> bool:
         """Whether credits notices are enabled (config display.credits_notices).
 
+        Credits notices only while the active target is Nous.  A third-party
+        relay (agentrouter.org) neither consumes Nous credits nor sends
+        x-nous-credits-* headers, so a stale depleted flag from an earlier
+        Nous turn must not show a false 'Credit access paused' banner over a
+        working non-Nous model.
+
         Read once per agent and cached — the policy runs after every API
-        response, and the setting governs UI noise, not correctness, so a
-        config flip applying on the next session is fine.  Fail-open True
-        (preserve current behaviour) on any config error.
+        response, and both the relay check and the setting govern UI noise,
+        not correctness, so a change applying on the next session is fine.
+        Fail-open True (preserve current behaviour) on any config error.
         """
         cached = getattr(self, "_credits_notices_enabled_cache", None)
         if cached is not None:
             return cached
         enabled = True
+        try:
+            base_url = (getattr(self, "base_url", "") or "")
+            if base_url and "nousresearch.com" not in base_url:
+                # Non-Nous target: never show Nous-credits notices.
+                self._credits_notices_enabled_cache = False
+                return False
+        except Exception:
+            pass
         try:
             from hermes_cli.config import load_config as _load_config
             _cfg = _load_config() or {}

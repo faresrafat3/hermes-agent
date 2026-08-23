@@ -12,7 +12,7 @@ function loadSoulHelpers({ serverInjects = false } = {}) {
   assert.notEqual(end, -1, 'soul-helper section delimiter is missing')
   const context = { serverInjectsProtocol: serverInjects }
   vm.runInNewContext(
-    `${source.slice(start, end)}\nObject.assign(globalThis, { botHandle, hasMessagingProtocol, ensureMessagingProtocol, composeSoul, messagingProtocolSection })`,
+    `${source.slice(start, end).replace(/^export const /gm, 'const ')}\nObject.assign(globalThis, { botHandle, hasMessagingProtocol, ensureMessagingProtocol, composeSoul, messagingProtocolSection })`,
     context
   )
   return context

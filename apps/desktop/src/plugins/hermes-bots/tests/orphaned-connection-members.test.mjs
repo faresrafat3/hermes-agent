@@ -40,6 +40,8 @@ function runtime() {
     .replace(/^import\s+\{[\s\S]*?\}\s+from '@hermes\/plugin-sdk'\r?\n/m, '')
     .replace(/^import .* from 'react'\r?\n/m, '')
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
+    .replace(/^export const GROUP_CHAT_MAX_MEMBERS/m, 'const GROUP_CHAT_MAX_MEMBERS')
+    .replace(/^export const groupChatMaxRoundsFor/m, 'const groupChatMaxRoundsFor')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
       '\nglobalThis.__orphan = { $groupChats, sweepGroupChatMembersForRemovedConnection, annotateOrphanedGroupChatMembers, markOrphanedGroupMemberDescriptor, groupMemberReferencesConnection, botSourceStatus, durableGroupChatMembers, botWorkspaceOwnerKey, setBotsWorkspaceOwner, useModelOptions, pluginCtxRef: () => pluginCtx, setPluginCtx: value => { pluginCtx = value } };'

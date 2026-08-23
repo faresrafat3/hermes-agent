@@ -168,6 +168,8 @@ function load({ failFirstSubmitWith = null, failEverySubmitWith = null, reply = 
     .replace(/^const \{ McpTab, ToolsetConfigPanel \} = sdk\r?\n/m, '')
     .replace(/^import .* from 'react'\r?\n/m, '')
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
+    .replace(/^export const GROUP_CHAT_MAX_MEMBERS/m, 'const GROUP_CHAT_MAX_MEMBERS')
+    .replace(/^export const groupChatMaxRoundsFor/m, 'const groupChatMaxRoundsFor')
     .replace('export default {', 'globalThis.plugin = {')
     .concat(
       '\nglobalThis.__lease = { runGroupChatMemberTurn, submitGroupTurnPrompt, isSessionGoneError, $groupChats };\n'

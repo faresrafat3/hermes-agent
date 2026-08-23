@@ -31,6 +31,8 @@ function runtime() {
     .replace(/^import .* from 'react'\r?\n/m, '')
     .replace(/^import .* from 'react\/jsx-runtime'\r?\n/m, '')
     .replace('export default {', 'globalThis.plugin = {')
+    .replace(/^export const GROUP_CHAT_MAX_MEMBERS/m, 'const GROUP_CHAT_MAX_MEMBERS')
+    .replace(/^export const groupChatMaxRoundsFor/m, 'const groupChatMaxRoundsFor')
     .concat(
       '\nglobalThis.__mergeMultiSourceRoster = mergeMultiSourceRoster;\nglobalThis.__botHandle = botHandle;\nglobalThis.__botRosterKey = botRosterKey;\nglobalThis.__botRosterMeta = botRosterMeta;\nglobalThis.__displayName = displayName;\nglobalThis.__filterBots = filterBots;\nglobalThis.__resolveRosterMentions = resolveRosterMentions;\nglobalThis.__botConnectionRoute = botConnectionRoute;\nglobalThis.__resolveBotConnectionRoute = resolveBotConnectionRoute;\nglobalThis.__preferReachableSameNameRows = preferReachableSameNameRows;'
     )
