@@ -6687,7 +6687,7 @@ function knownGroups(metaByName) {
 // ── group chats: bounded round-robin coordination over a shared room log ─────
 //
 // Behavioral model (clean-room): a group conversation is ONE ordered room log
-// owned by the plugin. A user send triggers at most GROUP_CHAT_MAX_ROUNDS
+// owned by the plugin. A user send triggers at most groupChatMaxRoundsFor(members)
 // serial round-robin rounds over the member roster — never parallel, no LLM
 // router. Who speaks each round is a deterministic @mention parse since the
 // last user message (mentioned members only, else everyone); whether a member
@@ -6697,10 +6697,14 @@ function knownGroups(metaByName) {
 // turn in its OWN persistent per-group Hermes session and is fed only the
 // room messages that are NEW since it last saw the room.
 
-const GROUP_CHAT_MAX_ROUNDS = 3
 const GROUP_CHAT_MAX_MESSAGES = 10
 const GROUP_CHAT_HISTORY_LIMIT = 24
-const GROUP_CHAT_MAX_MEMBERS = 6
+// Fares's fleet doctrine (Art 0.6 analogue): member ceiling raised for larger
+// councils; deliberation rounds taper with size so per-message LLM cost stays
+// bounded (members × rounds is the real multiplier, not members alone).
+export const GROUP_CHAT_MAX_MEMBERS = 12
+export const groupChatMaxRoundsFor = (memberCount) =>
+  memberCount <= 4 ? 4 : memberCount <= 8 ? 3 : 2
 
 /** "(pass)" (loosely: pass / (pass) / pass.) or empty = the member stayed silent. */
 function isGroupPassText(text) {
@@ -7987,10 +7991,11 @@ function heldMemberWatermarkAdvance(seen, logLength) {
 async function runGroupChatRounds(group, members, thread) {
   const startEpoch = ($groupChats.get()[group] || {}).epoch || 0
   const isCurrent = () => (($groupChats.get()[group] || {}).epoch || 0) === startEpoch
+  const maxRounds = groupChatMaxRoundsFor(members.length)
   let posted = 0
 
   try {
-    for (let round = 0; round < GROUP_CHAT_MAX_ROUNDS; round++) {
+    for (let round = 0; round < maxRounds; round++) {
       // Deliver any replies that finished after their turn timed out —
       // every member, not just this round's responders, so long work is
       // late, never lost.
