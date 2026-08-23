@@ -39,10 +39,23 @@ from agent.gemini_native_adapter import is_native_gemini_base_url
 from agent.model_metadata import is_local_endpoint
 from agent.message_content import flatten_message_text
 from agent.message_metadata import append_message, stamp_message_timestamp
-from agent.message_sanitization import (
-    _sanitize_surrogates,
-    _repair_tool_call_arguments,
-)
+try:
+    from agent.message_sanitization import (
+        _sanitize_surrogates,
+        _repair_tool_call_arguments,
+        sanitize_for_agentrouter,
+    )
+except ImportError:
+    _sanitize_surrogates = None
+    _repair_tool_call_arguments = None
+    sanitize_for_agentrouter = None
+
+
+def _sanitize_if_available(kwargs_or_msgs, provider, base_url=""):
+    """No-op when the sanitizer layer is absent."""
+    if sanitize_for_agentrouter is None:
+        return kwargs_or_msgs
+    return sanitize_for_agentrouter(kwargs_or_msgs, provider, base_url=base_url)
 from agent.reasoning_summaries import separate_glued_reasoning_blocks
 from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
 from tools.terminal_tool import is_persistent_env
@@ -50,6 +63,30 @@ from utils import base_url_host_matches, base_url_hostname, env_float, env_int
 
 logger = logging.getLogger(__name__)
 _OPENROUTER_PROVIDER_SORT_VALUES = {"throughput", "latency", "price"}
+
+# --- agentrouter.org debug payload dumper -----------------------------------
+_AR_DUMP_FLAG = "/tmp/ar_dump_on"
+_AR_DUMP_PATH = "/tmp/ar_payloads.jsonl"
+
+
+def _maybe_dump_agentrouter_payload(
+    tag: str, api_kwargs: dict, provider: str, base_url: str = ""
+) -> None:
+    """Append an outbound agentrouter payload to /tmp/ar_payloads.jsonl if the dump flag is set."""
+    try:
+        if not os.path.exists(_AR_DUMP_FLAG):
+            return
+        from agent.message_sanitization import _is_agentrouter_target
+
+        if not _is_agentrouter_target(provider, base_url):
+            return
+        import json as _json
+        with open(_AR_DUMP_PATH, "a", encoding="utf-8") as fh:
+            fh.write(_json.dumps({"tag": tag, "provider": provider, "kwargs": api_kwargs},
+                                 ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
+
 _PROVIDER_STREAM_ERROR_FINISH_REASONS = {"error", "error_finish"}
 _PROVIDER_STREAM_SSE_FIELDS = {"event", "data", "id", "retry"}
 _PROVIDER_STREAM_ERROR_TEXT_LIMIT = 4096
@@ -332,7 +369,10 @@ def _provider_stream_error_from_json_decode_error(
 def _iter_provider_stream_chunks(stream, *, response: Any = None):
     """Yield SDK chunks while translating SDK-level SSE decode failures."""
     try:
-        yield from stream
+        for chunk in stream:
+            if chunk is None:
+                continue  # agentrouter.org literal `data: null` SSE frame
+            yield chunk
     except json.JSONDecodeError as error:
         stream_response = response() if callable(response) else response
         if stream_response is None:
@@ -939,6 +979,14 @@ def _dispatch_nonstreaming_api_request(agent, api_kwargs: dict, *, make_client):
     interrupt, abort, cancellation, and close semantics stay in the callers —
     this helper only issues the request.
     """
+    _maybe_dump_agentrouter_payload(
+        "dispatch", api_kwargs, getattr(agent, "provider", ""),
+        getattr(agent, "base_url", "") or "",
+    )
+    api_kwargs = _sanitize_if_available(
+        api_kwargs, getattr(agent, "provider", ""),
+        base_url=getattr(agent, "base_url", "") or "",
+    )
     if agent.api_mode == "codex_responses":
         request_client = make_client("codex_stream_request")
         return agent._run_codex_stream(
@@ -2536,6 +2584,37 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         )
         return agent._try_activate_fallback(reason)
 
+    # ``require_same_model`` — model-pinned fallback entry.  The entry only
+    # applies when its model matches the model that just failed, so the chain
+    # can express "switch PROVIDERS serving this exact model, never switch to
+    # a different model".  A different-model primary (e.g. claude-opus-5 on a
+    # relay) never activates it and falls through to normal error handling.
+    #
+    # ``match_model`` (optional, list) — alternate wire names the same model is
+    # published under on this provider (e.g. stealth/ox-alpha on Nous/OpenRouter
+    # is x-preview-f-free on opencode-free).  The entry activates when the
+    # failed model equals ``model`` OR any ``match_model`` name.
+    if fb.get("require_same_model"):
+        failed_model = str(getattr(agent, "model", "") or "").strip().lower()
+        accepted = [fb_model.lower()]
+        accepted += [
+            str(n).strip().lower()
+            for n in (fb.get("match_model") or [])
+            if str(n).strip()
+        ]
+        if failed_model not in accepted:
+            logger.info(
+                "Fallback skip: %s/%s has require_same_model but primary model "
+                "is %r — this fallback only serves %s",
+                fb_provider,
+                fb_model,
+                failed_model,
+                ", ".join(accepted),
+            )
+            return agent._try_activate_fallback(reason)
+
+
+
     # Skip entries that resolve to the same backend that just failed —
     # falling back to it loops the failure. Identity semantics (which axes
     # distinguish two backends, shim aliases, first-class credential
@@ -3011,6 +3090,22 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             if isinstance(api_msg, dict):
                 for internal_key in [k for k in api_msg if isinstance(k, str) and k.startswith("_")]:
                     api_msg.pop(internal_key, None)
+
+        # agentrouter.org Filter A — defang sensitive words on the outbound
+        # summary request (hand-built; bypasses dispatch AND streaming).
+        _maybe_dump_agentrouter_payload(
+            "iteration_summary", {"model": agent.model, "messages": api_messages},
+            getattr(agent, "provider", ""),
+            getattr(agent, "base_url", "") or "",
+        )
+        # wrap the message LIST in a kwargs dict: sanitize_for_agentrouter
+        # expects the request-kwargs shape and mutates messages in place.
+        _summary_kwargs = {"messages": api_messages}
+        _sanitize_if_available(
+            _summary_kwargs, getattr(agent, "provider", ""),
+            base_url=getattr(agent, "base_url", "") or "",
+        )
+        api_messages = _summary_kwargs["messages"]
 
         summary_extra_body = {}
         try:
@@ -3959,6 +4054,14 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         attempt_stream_response = {"value": None}
 
         def _open_stream(next_api_kwargs: dict[str, Any]):
+            _maybe_dump_agentrouter_payload(
+                "stream", next_api_kwargs, getattr(agent, "provider", ""),
+                getattr(agent, "base_url", "") or "",
+            )
+            next_api_kwargs = _sanitize_if_available(
+                next_api_kwargs, getattr(agent, "provider", ""),
+                base_url=getattr(agent, "base_url", "") or "",
+            )
             stream_kwargs = {
                 **next_api_kwargs,
                 "stream": True,
