@@ -714,3 +714,60 @@ def test_read_handoffs_tolerates_missing_or_corrupt_ledger(tmp_path):
     (tmp_path / "bot_handoffs" / "handoffs.jsonl").write_text("{broken\n", encoding="utf-8")
     assert bot_handoffs.read_handoffs(tmp_path) == []
     assert bot_handoffs.read_handoffs(tmp_path / "nonexistent") == []
+
+
+def test_sweep_preserves_records_appended_after_its_read(tmp_path, monkeypatch):
+    """The documented Accepted race, exercised for real.
+
+    sweep_handoffs() rewrites the file via read → tmp write → os.replace. A
+    record appended by another profile process INSIDE that window is lost —
+    the docstring accepts this because the ledger is observability-only and
+    never gates a send. This test drives the actual interleaving (append fires
+    while sweep holds its snapshot, via a hook on os.replace) and pins both
+    halves of the contract: the concurrent append IS lost, everything in the
+    snapshot survives intact.
+    """
+    from tools import bot_handoffs
+
+    old = bot_handoffs.record_handoff(
+        tmp_path, sender="a", target="b", transport="local",
+        now=time.time() - 7 * 3600,
+    )
+    fresh = bot_handoffs.record_handoff(
+        tmp_path, sender="a", target="c", transport="local",
+        now=time.time(),
+    )
+
+    # The "concurrent" record lands while sweep is between its read_text()
+    # and os.replace() — the exact window the docstring names. We fire it from
+    # inside the replace call itself: by then the snapshot is frozen, so this
+    # append can only exist on disk, never in `kept`.
+    concurrent_id = "concurrent" + "0" * 6
+
+    real_replace = __import__("os").replace
+    fired = {"once": False}
+
+    def racing_replace(src, dst):
+        if not fired["once"]:
+            fired["once"] = True
+            # Another profile process appends right now — after sweep's read,
+            # before the replace swaps the file out from under it.
+            with open(tmp_path / "bot_handoffs" / "handoffs.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "id": concurrent_id, "at": int(time.time()),
+                    "from": "other-profile", "to": "d", "transport": "local",
+                }) + "\n")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(bot_handoffs.os, "replace", racing_replace)
+    removed = bot_handoffs.sweep_handoffs(tmp_path)
+
+    ids = [r["id"] for r in bot_handoffs.read_handoffs(tmp_path)]
+    assert old not in ids, "stale record survived sweep"
+    assert fresh in ids, "snapshot record was dropped"
+    assert concurrent_id not in ids, (
+        "race window closed? update the docstring — the ledger now preserves "
+        "concurrent appends"
+    )
+    assert removed == 1
+    assert fired["once"], "os.replace hook never fired — test drove nothing"
