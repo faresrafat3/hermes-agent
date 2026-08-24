@@ -231,6 +231,15 @@ id                   age  from             to                   transport proces
   does this hourly)
 - verified live on the real install: empty state, populated list, filter, sweep
 
+**Post-review hardening** (independent review found the argparse flag-clobber):
+subparser defaults used to overwrite parent-set values, so
+`hermes handoffs --json list` silently ran non-JSON. Fixed with
+`default=argparse.SUPPRESS` on the subparser side; three argparse-level tests
+(`test_flags_parse_*`, `test_defaults_hold_when_no_flag_given`) now lock the
+plumbing the old suite never exercised (it called `cmd_handoffs` directly).
+Name columns truncate to their widths so wide profile names keep the table
+aligned.
+
 ## 4. Where A2A actually belongs in this fleet
 
 **At the machine boundary — not inside it.**
