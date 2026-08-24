@@ -1,8 +1,10 @@
 # Fleet capability routing — what A2A teaches Bot Mode, and what it doesn't
 
-**Status:** capability tags SHIPPED (`tools/bot_mode_probe.py`, 21 tests green,
-verified on the live 12-profile fleet). Sender identity + work-item id are
-specified but NOT built.
+**Status:** all three A2A-derived gaps CLOSED and shipped — capability tags
+(`tools/bot_mode_probe.py`, verified on the live 12-profile fleet), sender
+identity at the display layer (`stripDeliveryPrefix`), and the handoff ledger
+as the addressable work item (`tools/bot_handoffs.py` + `hermes handoffs`
+read side). Read §3 for each gap's measured story.
 
 **Audience:** the `hermes-bots` workspace. This is the spec layer, not a tutorial.
 

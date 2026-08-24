@@ -117,6 +117,12 @@ def sweep_handoffs(root: Path | str, *, now: Optional[float] = None) -> int:
 
     Rewrite-on-sweep keeps the JSONL bounded; callers already run this cadence
     for the relay artifacts that share the same lifetime.
+
+    Accepted race: a record appended by a profile process between this
+    function's read_text() and os.replace() is silently dropped. Tolerated
+    because the ledger is observability-only with a 6h TTL and never gates a
+    send; serializing appends would cost every delivery a lock for data whose
+    loss is invisible.
     """
     from tools.bot_relay import STALE_AFTER_SECONDS
 

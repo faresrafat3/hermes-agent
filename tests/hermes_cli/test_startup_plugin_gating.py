@@ -37,35 +37,6 @@ from hermes_cli.main import (
 )
 
 
-# ── helper: grab the live set of top-level subcommands from argparse ───────
-
-
-def _live_subcommand_names() -> set[str]:
-    """Run ``hermes --help`` in-process and parse the subcommand block.
-
-    We patch ``_plugin_cli_discovery_needed`` to always return False so
-    plugin-registered commands aren't included — we're validating the
-    built-in-only set.
-    """
-    from hermes_cli import main as _main
-
-    argv_backup = sys.argv[:]
-    sys.argv = ["hermes", "--help"]
-    buf = io.StringIO()
-    try:
-        with patch.object(_main, "_plugin_cli_discovery_needed", return_value=False):
-            with redirect_stdout(buf):
-                with pytest.raises(SystemExit):
-                    _main.main()
-    finally:
-        sys.argv = argv_backup
-
-    text = buf.getvalue()
-    # argparse prints "{chat,model,...}" somewhere in the help output
-    m = re.search(r"\{([a-zA-Z0-9_,\-]+)\}", text)
-    assert m, f"Could not find subcommand group in --help output:\n{text[:500]}"
-    return set(m.group(1).split(","))
-
 
 # ── _first_positional_argv ─────────────────────────────────────────────────
 
@@ -99,6 +70,53 @@ def test_reasoning_value_is_not_misclassified_as_subcommand(monkeypatch):
 # ── _BUILTIN_SUBCOMMANDS ↔ argparse registration parity ────────────────────
 
 
+def _live_subcommand_names() -> set[str]:
+    """Run ``hermes --help`` in-process and parse the subcommand block.
+
+    We patch ``_plugin_cli_discovery_needed`` to always return False so
+    plugin-registered commands aren't included — we're validating the
+    built-in-only set.
+    """
+    from hermes_cli import main as _main
+
+    argv_backup = sys.argv[:]
+    sys.argv = ["hermes", "--help"]
+    buf = io.StringIO()
+    try:
+        with patch.object(_main, "_plugin_cli_discovery_needed", return_value=False):
+            with redirect_stdout(buf):
+                with pytest.raises(SystemExit):
+                    _main.main()
+    finally:
+        sys.argv = argv_backup
+
+    text = buf.getvalue()
+    # argparse prints "{chat,model,...}" somewhere in the help output
+    m = re.search(r"\{([a-zA-Z0-9_,\-]+)\}", text)
+    assert m, f"Could not find subcommand group in --help output:\n{text[:500]}"
+    return set(m.group(1).split(","))
+
+
+def test_builtin_subcommands_cover_every_registered_subcommand():
+    """Directional invariant (the reverse direction is NOT a fact — 44 of 72
+
+    live subcommands are deliberately absent from the slash-command registry,
+    so full set equality was correctly dropped in prune wave 2). What must
+    hold: every subcommand argparse actually registers appears in
+    ``_BUILTIN_SUBCOMMANDS``, or that command silently pays plugin discovery
+    on every startup (~500-650ms) and a plugin could shadow its name.
+
+    Known accepted exception: ``help`` sits in the frozenset but has no
+    dispatch branch — reserved name, worst case is one skipped discovery for
+    an unknown command. If you add a subcommand and this fails, add it to
+    ``_BUILTIN_SUBCOMMANDS`` (``hermes_cli/main.py``).
+    """
+    live = _live_subcommand_names()
+    missing = sorted(live - _BUILTIN_SUBCOMMANDS)
+    assert not missing, (
+        "subcommands registered by main() but missing from "
+        f"_BUILTIN_SUBCOMMANDS (slow-path regression): {missing}"
+    )
 
 
 # ── _resolve_deferred_platform_cli_command (issue #54678) ──────────────────
