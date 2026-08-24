@@ -12359,6 +12359,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "config", "console", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "egress", "fallback", "gateway", "hooks", "import", "import-agent", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
+        "handoffs",
         "journey", "memory-graph", "learning",
         "model", "monitoring", "pairing", "pause", "peer", "pets", "plugins", "portal", "profile",
         "project", "proxy",
@@ -13543,6 +13544,13 @@ def main():
     from hermes_cli.subcommands.peer import build_peer_parser
 
     build_peer_parser(subparsers)
+
+    # =========================================================================
+    # handoffs command — read the bot handoff ledger (who owes whom what)
+    # =========================================================================
+    from hermes_cli.subcommands.handoffs import build_handoffs_parser
+
+    build_handoffs_parser(subparsers)
 
     # =========================================================================
     # portal command — Nous Portal status + Tool Gateway routing
