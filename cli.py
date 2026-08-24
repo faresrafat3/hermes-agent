@@ -17603,6 +17603,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             _welcome_color = "#FFF8DC"
         self._console_print(f"[{_welcome_color}]{_welcome_text}[/]")
 
+        # Deferred goal-restore notice: if the startup --resume re-armed an
+        # active goal, tell the user now (after the banner) that the loop is
+        # taking its next step. The prompt itself was queued earlier.
+        restore_note = getattr(self, "_goal_restore_pending_note", None)
+        if restore_note:
+            self._console_print(f"[{_welcome_color}]{restore_note}[/]")
+            self._goal_restore_pending_note = None
+
         # Warm the /model picker's provider-models cache off-thread during this
         # idle window (banner shown, user about to type). The no-args picker
         # otherwise blocks ~1-2s on serial /v1/models fetches the first time

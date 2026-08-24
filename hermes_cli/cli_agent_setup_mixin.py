@@ -726,6 +726,29 @@ class CLIAgentSetupMixin:
             self._restore_session_cwd(session_meta)
             self._restore_session_yolo(session_meta)
             self._restore_session_model(session_meta)
+
+            # Re-arm an ACTIVE goal that was mid-flight when this session last
+            # ran (M2): startup `hermes --resume`/`-c` must behave like a
+            # mid-chat /resume. The continuation queues into _pending_input;
+            # the banner below tells the user what is about to happen.
+            import logging as _logging
+
+            try:
+                mgr = self._get_goal_manager()
+                if (
+                    mgr is not None
+                    and getattr(mgr, "session_id", "") == getattr(self, "session_id", "")
+                ):
+                    restored, prompt, note = mgr.restore_after_resume()
+                    if restored and prompt:
+                        self._pending_input.put(prompt)
+                        self._goal_restore_pending_note = f"▶ {note} — taking the next step."
+                    elif note:
+                        self._console_print(
+                            f"[{_accent_hex()}]{note}[/]"
+                        )
+            except Exception as exc:
+                _logging.debug("goal restore after startup resume failed: %s", exc)
         else:
             accent_color = _accent_hex()
             self._console_print(
