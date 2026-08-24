@@ -94,3 +94,35 @@ def test_sweep_subcommand_reports_removed_count(tmp_path, capsys):
 def test_unknown_action_is_a_usage_error(tmp_path):
     rc = handoffs_cmd.cmd_handoffs(_args(root=str(tmp_path), handoffs_action="bogus"))
     assert rc == 2
+
+
+# ── argparse-level wiring (the suite above calls cmd_handoffs directly and
+#    never exercises the parser; this locks the flag plumbing) ────────────────
+
+
+def _parse(argv):
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    top = parser.add_subparsers(dest="_top")
+    handoffs_cmd.build_handoffs_parser(top)
+    return parser.parse_args(["handoffs", *argv])
+
+
+def test_flags_parse_before_the_action():
+    """Regression: subparser defaults used to CLOBBER parent-set values, so
+    `handoffs --json list` silently ran non-JSON."""
+    assert getattr(_parse(["--json", "list"]), "json") is True
+    assert getattr(_parse(["--to", "dixie", "list"]), "to") == "dixie"
+
+
+def test_flags_parse_after_the_action():
+    args = _parse(["list", "--json"])
+    assert getattr(args, "json") is True
+    assert getattr(_parse(["list", "--to", "spark"]), "to") == "spark"
+
+
+def test_defaults_hold_when_no_flag_given():
+    args = _parse(["list"])
+    assert getattr(args, "json") is False
+    assert getattr(args, "to") == ""

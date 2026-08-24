@@ -89,9 +89,10 @@ def cmd_handoffs(args) -> int:
     for rec in records:
         hid = str(rec.get("id") or "?")
         age = _fmt_age(int(rec.get("at") or 0), now)
-        sender = str(rec.get("from") or "?")
-        to = str(rec.get("to") or "?")
-        transport = str(rec.get("transport") or "?")
+        # Truncate so wide profile names cannot push the columns apart.
+        sender = str(rec.get("from") or "?")[:16]
+        to = str(rec.get("to") or "?")[:20]
+        transport = str(rec.get("transport") or "?")[:9]
         proc = str(rec.get("process_id") or "-")
         extra = ""
         if rec.get("envelope_id"):
@@ -130,8 +131,13 @@ def build_handoffs_parser(subparsers) -> None:
     handoffs_sub = parser.add_subparsers(dest="handoffs_action")
 
     list_p = handoffs_sub.add_parser("list", aliases=["ls"], help="List handoff records (oldest first)")
-    list_p.add_argument("--json", action="store_true", default=False, help="Emit records as JSON")
-    list_p.add_argument("--to", default="", help="Filter by target agent name")
+    # SUPPRESS on the subparser side: argparse subparser defaults would
+    # otherwise CLOBBER values the user set before the action word
+    # (`hermes handoffs --json list` silently ran non-JSON). With SUPPRESS the
+    # subparser only writes these attrs when actually given; the parent's
+    # defaults below still apply when neither form sets them.
+    list_p.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Emit records as JSON")
+    list_p.add_argument("--to", default=argparse.SUPPRESS, help="Filter by target agent name")
 
     handoffs_sub.add_parser("sweep", help="Drop records older than the relay staleness clock")
 
