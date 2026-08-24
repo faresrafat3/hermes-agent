@@ -1965,10 +1965,50 @@ class GoalManager:
         self._state.waiting_on_pid = None
         self._state.waiting_on_session = None
         self._state.waiting_until = 0.0
-        self._state.waiting_reason = None
-        self._state.waiting_since = 0.0
+        # waiting_since is deliberately KEPT here: it marks "was parked, now
+        # unparked" so barrier_just_cleared_prompt() can fire the idle hook's
+        # continuation exactly once. It is zeroed after the prompt is served.
         save_goal(self.session_id, self._state)
         return True
+
+    def barrier_just_cleared_prompt(self) -> Optional[str]:
+        """Idle-continuation probe (M2): when a parked goal's barrier has
+        *just* cleared — pid exited, deadline passed, watcher session ended —
+        the loop would otherwise stay asleep until the user types something.
+        Returns the canonical continuation prompt so an idle hook can re-arm
+        the goal, or None when there is nothing to wake (no goal, paused,
+        done, no barrier was ever set, or still waiting).
+
+        Once-per-clearing: ``waiting_since`` is kept when a barrier clears
+        (set at park time) and zeroed here after firing — it IS the
+        "was parked, now isn't" marker. A goal that was never parked has
+        waiting_since == 0 and produces no spurious fire.
+        """
+        s = self._state
+        if s is None or s.status != "active":
+            return None
+        # A LIVE barrier → still parked, nothing to fire. Liveness is checked
+        # through the same helpers is_waiting() uses: a dead pid / ended
+        # watcher session / expired deadline counts as CLEARED here, and the
+        # clear is persisted below (waiting_since stays as the once-marker).
+        if s.waiting_on_session is not None and _session_waiting(s.waiting_on_session):
+            return None
+        if s.waiting_on_pid is not None and _pid_alive(s.waiting_on_pid):
+            return None
+        if s.waiting_until and time.time() < s.waiting_until:
+            return None
+        # The once-marker: only a goal that WAS parked (waiting_since set at
+        # park time) and is now unparked fires. Zeroed after serving.
+        if not s.waiting_since:
+            return None
+        prompt = self.next_continuation_prompt()
+        park_reason = s.waiting_reason
+        s.waiting_since = 0.0
+        s.waiting_reason = None
+        if park_reason:
+            s.last_reason = f"resumed after wait: {park_reason}"
+        save_goal(self.session_id, s)
+        return prompt
 
     def is_waiting(self) -> bool:
         """True iff a barrier is set AND not yet satisfied.

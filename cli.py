@@ -12844,6 +12844,31 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         self._loop_manager = mgr
         return mgr
 
+    def _maybe_fire_goal_barrier_continuation(self) -> None:
+        """Idle hook (M2): re-fire a /goal whose wait barrier just cleared.
+
+        Runs at the same idle boundary as _maybe_fire_loop_tick — agent not
+        running, input queue empty. barrier_just_cleared_prompt() is
+        once-per-clearing, so repeated idle polls are cheap no-ops. A real
+        user message always wins: the queue-empty check upstream guarantees
+        nothing is queued when this fires.
+        """
+        mgr = self._get_goal_manager()
+        if mgr is None or not mgr.is_active():
+            return
+        prompt = mgr.barrier_just_cleared_prompt()
+        if not prompt:
+            return
+        try:
+            self._pending_input.put(prompt)
+            state = mgr.state
+            reason = getattr(state, "last_reason", "") or "wait cleared"
+            from cli import _DIM, _RST, _cprint
+
+            _cprint(f"  ▶ Goal wait cleared ({reason}) — continuing now.{_RST}")
+        except Exception as exc:
+            logging.debug("goal barrier continuation enqueue failed: %s", exc)
+
     def _maybe_fire_loop_tick(self) -> None:
         """Idle hook run from process_loop: fire a due /loop wakeup.
 
@@ -20374,6 +20399,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                             # queued user input and active /goal loops).
                             try:
                                 self._maybe_fire_loop_tick()
+                            except Exception:
+                                pass
+                            # M2 idle continuation: a parked /goal whose wait
+                            # barrier JUST cleared (pid exited, deadline
+                            # passed, watcher fired) re-fires here instead of
+                            # sleeping until the user types something.
+                            try:
+                                self._maybe_fire_goal_barrier_continuation()
                             except Exception:
                                 pass
                         continue
