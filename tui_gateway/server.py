@@ -9170,6 +9170,19 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     """
     home = _session_home(session)
     marker = read_turn_marker(home, session_key)
+    if marker is not None:
+        return _schedule_marker_auto_continue(sid, session, session_key, marker)
+    # No interrupted-turn marker — but a PERSISTED ACTIVE /goal that was
+    # mid-flight when the process died must also pick back up (M2 of the
+    # /goal long-horizon project). Same dispatch machinery, goal-judged.
+    return _maybe_schedule_goal_restore(sid, session, session_key)
+
+
+def _schedule_marker_auto_continue(
+    sid: str, session: dict, session_key: str, marker: dict
+) -> dict | None:
+    home = _session_home(session)
+    marker = read_turn_marker(home, session_key)
     if marker is None:
         return None
     enabled, freshness_secs, max_attempts = _auto_continue_config()
@@ -9238,6 +9251,71 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         age,
     )
     return {"attempt": attempt, "interrupted_at": marker["started_at"]}
+
+
+def _maybe_schedule_goal_restore(
+    sid: str, session: dict, session_key: str
+) -> dict | None:
+    """Re-arm a persisted ACTIVE /goal on a cold resume of its session (M2).
+
+    When the process died mid-goal there is no interrupted-turn marker (the
+    turn completed; the LOOP is what died). ``GoalManager.restore_after_resume``
+    decides: active goals re-fire through the same synthesized-turn machinery
+    as marker auto-continue, stale wait barriers clear, live barriers stay
+    parked, paused goals never auto-resume. Returns the payload descriptor or
+    None when there was nothing to restore.
+    """
+    try:
+        from hermes_cli.goals import GoalManager
+
+        goals_cfg = (_load_cfg() or {}).get("goals") or {}
+        goal_max_turns = int(goals_cfg.get("max_turns", 20) or 20)
+        goal_mgr = GoalManager(session_id=session_key, default_max_turns=goal_max_turns)
+        restored, prompt, note = goal_mgr.restore_after_resume()
+    except Exception:
+        logger.debug("goal restore check failed for %s", session_key, exc_info=True)
+        return None
+    if not restored or not prompt:
+        if note:
+            logger.info("goal not restored for %s: %s", session_key, note)
+        return None
+
+    def kickoff() -> None:
+        rid = f"__goal_restore__{int(time.time() * 1000)}"
+        try:
+            _start_agent_build(sid, session)
+            err = _wait_agent(session, rid, timeout=120.0)
+        except Exception:
+            logger.warning("goal-restore agent build failed for %s", sid, exc_info=True)
+            err = {"error": {"message": "agent build failed"}}
+        if err:
+            return
+        with session["history_lock"]:
+            # A real user prompt beat us to it — theirs wins.
+            if (
+                session.get("running")
+                or session.get("_turn_cancel_requested")
+                or session.get("_finalized")
+            ):
+                return
+            session["running"] = True
+            session["last_active"] = time.time()
+        try:
+            _emit(
+                "status.update",
+                sid,
+                {"kind": "process", "text": "Resuming active goal…"},
+            )
+            _emit("message.start", sid)
+            _run_prompt_submit(rid, sid, session, prompt, display_kind="auto_continue")
+        except Exception as exc:
+            logger.warning("goal-restore dispatch failed for %s: %s", sid, exc)
+            with session["history_lock"]:
+                session["running"] = False
+
+    threading.Thread(target=kickoff, daemon=True).start()
+    logger.info("goal restore scheduled for session %s", session_key)
+    return {"kind": "goal_restore"}
 
 
 def _enqueue_prompt(

@@ -1531,6 +1531,64 @@ class GoalManager:
         save_goal(self.session_id, self._state)
         return self._state
 
+    def restore_after_resume(self) -> Tuple[bool, Optional[str], str]:
+        """Re-arm an ACTIVE goal after the session itself was resumed/restarted.
+
+        This is the ``/resume``-surface counterpart of ``resume()`` (which is
+        the explicit ``/goal resume`` control): a goal that was mid-flight when
+        the process died, the tab closed, or the session was compressed must
+        pick its loop back up WITHOUT the user having to know about goals at
+        all — they resumed their work; the goal resumes with it.
+
+        Contract:
+        - Only ``active`` goals fire. A ``paused`` goal stays paused (the user
+          paused it on purpose); ``done``/``cleared`` never fire.
+        - Stale wait barriers are re-checked against live liveness here: a pid
+          that died, a registry session no longer waiting, or a deadline that
+          passed while the process was down clears instead of parking forever.
+          Barriers still genuinely live stay parked (no turn burned).
+        - The returned prompt is the canonical continuation message — the
+          caller decides transport (CLI input queue, gateway FIFO, TUI submit).
+
+        Returns ``(restored, prompt, note)`` where ``restored`` means the loop
+        should take a step now, ``prompt`` is the user-role continuation text
+        (None → caller falls back to "send any message"), and ``note`` is a
+        human-readable one-liner for status output.
+        """
+        s = self._state
+        if s is None or s.status != "active":
+            return False, None, ""
+
+        # Re-validate wait barriers against live liveness after downtime.
+        if s.waiting_on_session and not _session_waiting(s.waiting_on_session):
+            s.waiting_on_session = None
+        if s.waiting_on_pid and not _pid_alive(s.waiting_on_pid):
+            s.waiting_on_pid = None
+        if s.waiting_until and time.time() >= s.waiting_until:
+            s.waiting_until = 0.0
+        cleared_any = (
+            (s.waiting_on_session is None)
+            + (s.waiting_on_pid is None)
+            + (not s.waiting_until)
+        )
+        still_parked = bool(
+            s.waiting_on_session or s.waiting_on_pid
+            or (s.waiting_until and time.time() < s.waiting_until)
+        )
+        if cleared_any and not still_parked:
+            s.waiting_reason = None
+            s.waiting_since = 0.0
+        save_goal(self.session_id, s)
+
+        if still_parked:
+            return False, None, self.status_line()
+
+        prompt = self.next_continuation_prompt()
+        if not prompt:
+            return False, None, ""
+        return True, prompt, f"Goal restored: {s.goal}"
+
+
     def clear(self) -> None:
         if self._state is None:
             return

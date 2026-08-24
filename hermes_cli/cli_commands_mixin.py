@@ -1210,6 +1210,32 @@ class CLICommandsMixin:
         # startup --resume (_preload_resumed_session / _init_agent path).
         self._restore_session_model(session_meta)
 
+        # Re-arm an ACTIVE goal that was mid-flight when this session was last
+        # open (M2 of /goal long-horizon): the user resumed their work; the
+        # goal resumes with it. Stale wait barriers re-validate against live
+        # liveness here; the continuation prompt queues through the same input
+        # path `/goal resume` uses, so ordering/preemption stay identical.
+        import logging as _logging
+
+        from cli import _DIM, _RST
+
+        try:
+            mgr = self._get_goal_manager()
+            if mgr is not None and mgr.session_id != getattr(self, "session_id", ""):
+                mgr = None  # defensive: never restore into a stale binding
+        except Exception:
+            mgr = None
+        if mgr is not None:
+            try:
+                restored, prompt, note = mgr.restore_after_resume()
+                if restored and prompt:
+                    self._pending_input.put(prompt)
+                    _cprint(f"  ▶ {note} — taking the next step.")
+                elif note:
+                    _cprint(f"  {_DIM}{note}{_RST}")
+            except Exception as exc:
+                _logging.debug("goal restore after /resume failed: %s", exc)
+
     def _handle_sessions_command(self, cmd_original: str) -> None:
         """Handle /sessions [list|<id_or_title>] — browse or resume previous sessions.
 
