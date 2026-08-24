@@ -8468,6 +8468,30 @@ const A2A_RE = /^Message from (?:agent '([^']+)'|🤖\s*([^\s(@]+))/i
 /** Strip the delivery prefix so a DM preview reads like a DM, not a log line. */
 const A2A_PREFIX_RE = /^Message from (?:agent '[^']+'|🤖[^:]+):\s*/i
 
+/** Remove EVERY leading delivery prefix, not just the outermost one.
+ *
+ *  The prefix is applied server-side (tools/bot_mode_dm.py), so a sender cannot
+ *  lie about who it is — `previewKind` always attributes to the real sender.
+ *  But the message BODY is free text from a model, and a body that itself opens
+ *  with `Message from 🤖 leader (@leader):` used to survive a single-pass strip:
+ *  the roster row said "from dixie" while the text it rendered read as an
+ *  attribution to `leader`, and a receiving bot quoting what it was shown
+ *  re-delivered that forgery as a first-class attribution line (relay hop).
+ *
+ *  Peeling repeatedly means the displayed body can never read as a second
+ *  attribution: the row is the only thing that says who sent the message.
+ *  Bounded so a pathological body cannot spin here.
+ */
+function stripDeliveryPrefix(text) {
+  let out = (text || '').trim()
+  for (let i = 0; i < 8; i++) {
+    const next = out.replace(A2A_PREFIX_RE, '').trim()
+    if (next === out) break
+    out = next
+  }
+  return out
+}
+
 /** Classify a roster preview: `{ fromBot: handle|null }`. A preview that
  *  starts with the delivery prefix is a bot-to-bot message — the receiving
  *  bot's row should show WHO sent it, not present it as the human's chat. */
@@ -8503,7 +8527,7 @@ function generatedSessionTitle(session, preview) {
   if (raw && !isGenericTitle(raw)) {
     return raw
   }
-  const cleaned = (preview || '').trim().replace(A2A_PREFIX_RE, '').trim()
+  const cleaned = stripDeliveryPrefix(preview)
   if (!cleaned) {
     return raw || 'Conversation'
   }
@@ -8689,7 +8713,7 @@ function BotRow({ bot, onDelete, onEdit, onGroup, showHandle }) {
   // DM previews read like DMs: strip the delivery prefix, keep the message.
   const displayPreview = stripPreviewMarkdown(
     fromBot
-      ? (previewSession?.preview || '').replace(A2A_PREFIX_RE, '').trim() || '…'
+      ? stripDeliveryPrefix(previewSession?.preview) || '…'
       : previewSession?.preview || ''
   )
   const handle = botHandle(bot.name, bot)
