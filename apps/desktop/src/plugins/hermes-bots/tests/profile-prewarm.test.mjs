@@ -21,6 +21,14 @@ function activitySessionSource() {
   return sourceBetween('function botActivitySession(', '/** Bots that are working')
 }
 
+// The REAL delivery-prefix stripper + its regex. BotRow renders DM previews
+// through stripDeliveryPrefix, which lives ABOVE the BotRow slice; without
+// injecting the real one here any test that exercises the fromBot branch
+// would die on a latent ReferenceError (and a hand stub would drift).
+function deliveryPrefixSource() {
+  return sourceBetween('const A2A_PREFIX_RE', '/** Classify a roster preview')
+}
+
 function renderBotRow(input = 'alpha') {
   const bot = typeof input === 'string' ? { name: input } : input
   const name = bot.name
@@ -105,7 +113,6 @@ function renderBotRow(input = 'alpha') {
     },
     workerActiveAt: () => false,
     ACTIVE_WINDOW_S: 90,
-    A2A_PREFIX_RE: /^$/,
     useEffect: () => undefined,
     useState: initial => [typeof initial === 'function' ? initial() : initial, () => undefined],
     host: {
@@ -148,7 +155,7 @@ function renderBotRow(input = 'alpha') {
     useValue: store => store.get()
   }
 
-  vm.runInNewContext(`${activitySessionSource()}\n${routeSource}\n${botRowSource}\nglobalThis.BotRow = BotRow`, context)
+  vm.runInNewContext(`${deliveryPrefixSource()}\n${activitySessionSource()}\n${routeSource}\n${botRowSource}\nglobalThis.BotRow = BotRow`, context)
 
   const tree = context.BotRow({ bot, onEdit: context.onEdit })
   const row = tree.type === 'button' ? tree : tree.props.children[0].props.children
@@ -295,7 +302,6 @@ test('behavior: remote default never opens the same-name local chat', async () =
     },
     workerActiveAt: () => false,
     ACTIVE_WINDOW_S: 90,
-    A2A_PREFIX_RE: /^$/,
     useEffect: () => undefined,
     useState: initial => [typeof initial === 'function' ? initial() : initial, () => undefined],
     host: {
@@ -321,7 +327,7 @@ test('behavior: remote default never opens the same-name local chat', async () =
   }
 
   const routeSource = sourceBetween('function botConnectionRoute(', 'function rewriteCliProfileOperands(')
-  vm.runInNewContext(`${activitySessionSource()}\n${routeSource}\n${botRowSource}\nglobalThis.BotRow = BotRow`, context)
+  vm.runInNewContext(`${deliveryPrefixSource()}\n${activitySessionSource()}\n${routeSource}\n${botRowSource}\nglobalThis.BotRow = BotRow`, context)
   const tree = context.BotRow({ bot, onEdit: context.onEdit })
   const row = tree.type === 'button' ? tree : tree.props.children[0].props.children
 

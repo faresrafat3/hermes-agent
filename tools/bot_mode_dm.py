@@ -178,6 +178,15 @@ def _hermes_root(home: Path) -> Path:
     return home
 
 
+def _ledger_root(agent: Any) -> Path:
+    """The install root the handoff ledger lives under (never raises)."""
+    try:
+        return _hermes_root(Path(_agent_home(agent)))
+    except Exception:
+        home = Path(os.getenv("HERMES_HOME") or os.path.expanduser("~/.hermes"))
+        return _hermes_root(home)
+
+
 def _self_profile_name(home: Path) -> str:
     if home.parent.name == "profiles":
         return home.name
@@ -310,6 +319,7 @@ def message_agent_tool(
             stdin_file=True,
             task_id=task_id,
             agent=agent,
+            handoff={"sender": me, "target": dm_target, "transport": "peer"},
         )
 
     # ── local teammate ──
@@ -362,7 +372,15 @@ def message_agent_tool(
         stdin_file=False,
         task_id=task_id,
         agent=agent,
+        handoff={"sender": me, "target": resolved, "transport": "local"},
     )
+
+
+def _relay_waiter_command(root: Path, envelope: dict) -> str:
+    """Indirection so tests (and future callers) can patch the waiter build."""
+    from tools.bot_relay import waiter_command
+
+    return waiter_command(root, envelope)
 
 
 def _try_relay_delivery(
@@ -389,7 +407,6 @@ def _try_relay_delivery(
             enqueue_envelope,
             read_remote_roster,
             resolve_remote_target,
-            waiter_command,
         )
 
         roster = read_remote_roster(root)
@@ -423,7 +440,16 @@ def _try_relay_delivery(
             return json.dumps({"error": str(exc), "reason": exc.reason})
         label = f"@{match['handle']} on {match['connection_label'] or match['connection_id']}"
         return _spawn_delivery(
-            waiter_command(root, envelope), label, task_id=task_id, agent=agent
+            _relay_waiter_command(root, envelope),
+            label,
+            task_id=task_id,
+            agent=agent,
+            handoff={
+                "sender": me,
+                "target": str(match.get("handle") or match.get("profile") or ""),
+                "transport": "relay",
+                "envelope_id": str(envelope.get("id") or ""),
+            },
         )
     except Exception:
         logger.debug("relay delivery attempt failed", exc_info=True)
@@ -624,6 +650,7 @@ def _start_delivery(
     stdin_file: bool,
     task_id: Optional[str],
     agent: Any,
+    handoff: Optional[dict] = None,
 ) -> str:
     """Create a DM file and transfer its cleanup ownership to the runner."""
     dm_file = _write_dm_file(content)
@@ -638,6 +665,7 @@ def _start_delivery(
         dm_file=dm_file,
         task_id=task_id,
         agent=agent,
+        handoff=handoff,
     )
 
 
@@ -648,12 +676,18 @@ def _spawn_delivery(
     dm_file: Optional[str] = None,
     task_id: Optional[str],
     agent: Any,
+    handoff: Optional[dict] = None,
 ) -> str:
     """Launch the cleanup-owning runner and transfer file ownership on ack.
 
     ``dm_file`` is None for relay deliveries: the waiter command watches a
     reply file, and the envelope artifacts are owned and swept by
     ``tools/bot_relay.py`` — there is no plaintext DM tempfile to reclaim.
+
+    ``handoff`` (optional) records this delivery as an addressable work item
+    in the bot handoff ledger (``tools/bot_handoffs.py``): sender, target,
+    transport, process id, and for relays the envelope id. Recording is
+    best-effort — a ledger failure never blocks a send.
     """
     transferred = False
     try:
@@ -677,6 +711,21 @@ def _spawn_delivery(
         # From this point the background runner owns the file and removes it
         # only after the local query-file or peer stdin consumer has finished.
         transferred = True
+        handoff_id = ""
+        if isinstance(handoff, dict):
+            try:
+                from tools.bot_handoffs import record_handoff
+
+                handoff_id = record_handoff(
+                    _ledger_root(agent),
+                    sender=handoff.get("sender") or "",
+                    target=handoff.get("target") or "",
+                    transport=handoff.get("transport") or "",
+                    process_id=proc_id,
+                    envelope_id=handoff.get("envelope_id") or "",
+                )
+            except Exception:  # ledger is observability, never a send blocker
+                logger.debug("handoff recording failed", exc_info=True)
         return json.dumps(
             {
                 "status": "sent",
@@ -688,6 +737,7 @@ def _spawn_delivery(
                     "that agent."
                 ),
                 **({"process_id": proc_id} if proc_id else {}),
+                **({"handoff_id": handoff_id} if handoff_id else {}),
                 "sent_at": int(time.time()),
             }
         )

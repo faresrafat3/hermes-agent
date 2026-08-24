@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from tools import bot_mode_dm, bot_mode_probe
+from tools import bot_mode_dm, bot_mode_probe, bot_relay
 
 
 @pytest.fixture(autouse=True)
@@ -604,3 +604,113 @@ def test_dm_dir_rejects_precreated_symlink(tmp_path, monkeypatch):
 
     with pytest.raises(PermissionError, match="not a directory"):
         bot_mode_dm._dm_dir()
+
+
+# ── handoff ledger (work-item identity for DMs) ──────────────────────────────
+#
+# A DM is fire-and-forget: the only artifact was a temp file that dies after
+# delivery and a dangling process id. "Who owes whom what" was not queryable.
+# The ledger makes each delivery an addressable work item — append-only JSONL,
+# swept on the relay's staleness clock.
+
+
+def _read_ledger(home: Path) -> list[dict]:
+    from tools.bot_handoffs import read_handoffs
+
+    return read_handoffs(home)
+
+
+def test_local_dm_appends_a_handoff_record(tmp_path, monkeypatch):
+    _capture_spawn(monkeypatch)
+    home = _managed_home(tmp_path, teammates=("researcher",))
+    agent = _FakeAgent(home, title="Bot Chat")
+
+    before = len(_read_ledger(home))
+    result = json.loads(
+        bot_mode_dm.message_agent_tool(target="researcher", message="status?", agent=agent)
+    )
+    assert result["status"] == "sent"
+
+    records = _read_ledger(home)
+    assert len(records) == before + 1
+    rec = records[-1]
+    assert rec["from"] == "default"
+    assert rec["to"] == "researcher"
+    assert rec["transport"] == "local"
+    assert rec["process_id"] == "proc_test1234"
+
+
+def test_ack_carries_the_handoff_id(tmp_path, monkeypatch):
+    """The sender's model can cite the work item later; the reply wakes the
+    same background process, so the id is recoverable without new plumbing."""
+    _capture_spawn(monkeypatch)
+    home = _managed_home(tmp_path, peers=("spark",))
+    agent = _FakeAgent(home, title="Bot Chat")
+
+    result = json.loads(
+        bot_mode_dm.message_agent_tool(target="spark/researcher", message="ping", agent=agent)
+    )
+    assert result["status"] == "sent"
+    rec = _read_ledger(home)[-1]
+    assert result.get("handoff_id") == rec["id"]
+    assert rec["transport"] == "peer"
+
+
+def test_relay_delivery_links_envelope_and_handoff(tmp_path, monkeypatch):
+    import tools.bot_relay as bot_relay
+
+    calls = _capture_spawn(monkeypatch)
+
+    def fake_waiter_command(root, envelope):
+        calls.append({"command": f"waiter-for-{envelope['id']}"})
+        return f"waiter-for-{envelope['id']}"
+
+    monkeypatch.setattr(bot_relay, "waiter_command", fake_waiter_command)
+    monkeypatch.setattr(bot_mode_dm, "_relay_waiter_command", lambda root, env: fake_waiter_command(root, env))
+
+    home = _managed_home(tmp_path)  # managed gate + default profile
+    # A relay roster row so the target resolves cross-connection.
+    bot_relay.write_remote_roster(
+        home,
+        [{"profile": "dixie", "handle": "dixie", "connection_id": "conn1"}],
+    )
+    agent = _FakeAgent(home, title="Bot Chat")
+
+    result = json.loads(
+        bot_mode_dm.message_agent_tool(target="dixie", message="cross-machine ping", agent=agent)
+    )
+    assert result["status"] == "sent"
+
+    records = [r for r in _read_ledger(home) if r["transport"] == "relay"]
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["from"] == "default"
+    assert rec["to"] == "dixie"
+    assert rec.get("envelope_id"), "relay handoff must link its envelope"
+    assert result.get("handoff_id") == rec["id"]
+
+
+def test_ledger_is_append_only_and_swept_on_relay_clock(tmp_path):
+    from tools import bot_handoffs
+
+    old = bot_handoffs.record_handoff(tmp_path, sender="a", target="b", transport="local")
+    fresh = bot_handoffs.record_handoff(tmp_path, sender="a", target="c", transport="local")
+    assert old and fresh and old != fresh
+
+    # Nothing is deleted while young.
+    bot_handoffs.sweep_handoffs(tmp_path)
+    assert len(_read_ledger(tmp_path)) == 2
+
+    # Older than the relay's stale clock → gone.
+    future = time.time() + bot_relay.STALE_AFTER_SECONDS + 10
+    bot_handoffs.sweep_handoffs(tmp_path, now=future)
+    assert _read_ledger(tmp_path) == []
+
+
+def test_read_handoffs_tolerates_missing_or_corrupt_ledger(tmp_path):
+    from tools import bot_handoffs
+
+    (tmp_path / "bot_handoffs").mkdir()
+    (tmp_path / "bot_handoffs" / "handoffs.jsonl").write_text("{broken\n", encoding="utf-8")
+    assert bot_handoffs.read_handoffs(tmp_path) == []
+    assert bot_handoffs.read_handoffs(tmp_path / "nonexistent") == []

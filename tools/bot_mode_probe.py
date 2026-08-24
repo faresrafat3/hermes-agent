@@ -40,6 +40,15 @@ _PROTOCOL_HEADING = "## Messaging other agents"
 # createCanonicalChat title and the `-c "Bot Chat"` resume target.
 BOT_CHAT_TITLE = "Bot Chat"
 
+# Capability tags per teammate on the roster line. Bounded because the roster
+# block is rendered into EVERY teammate's eternal Bot Chat prompt: a generalist
+# with 30 skill categories would otherwise cost every other bot those tokens
+# forever. Eight is enough to route a handoff; the char budget is the real
+# bound, since category names vary from "security" to
+# "context-verification-and-prompt-untrusted-input-defense".
+_MAX_CAPABILITY_TAGS = 8
+_MAX_CAPABILITY_CHARS = 96
+
 _lock = threading.Lock()
 _cached: dict[str, str] = {}
 
@@ -123,6 +132,33 @@ def _handle(name: str) -> str:
     return "hermes" if name == "default" else name
 
 
+def _strip_title_echo(description: str, title: str) -> str:
+    """Remove the bot title where the description merely repeats it.
+
+    Handles the two shapes the Bots UI actually produces: a description that
+    IS the title (possibly repeated with the same em-dash separator the role
+    join uses), and one that opens with the title before adding real detail.
+    Returns "" when nothing but echoes remain.
+    """
+    remainder = description
+    title_l = title.casefold()
+    # Peel repeated leading "title — " / "title - " / "title: " prefixes.
+    while True:
+        stripped = remainder.lstrip()
+        if not stripped.casefold().startswith(title_l):
+            break
+        rest = stripped[len(title):].lstrip()
+        rest_no_sep = rest.lstrip("—-:,·|").lstrip()
+        if rest_no_sep == rest and rest:
+            # Title is a prefix of a longer word (e.g. "leader" in
+            # "leadership") — not an echo; keep the description intact.
+            break
+        remainder = rest_no_sep
+        if not remainder:
+            break
+    return remainder.strip()
+
+
 def _profile_role(profile_dir: Path) -> str:
     """A teammate's role line: Bot Mode title, else profile description.
 
@@ -148,6 +184,17 @@ def _profile_role(profile_dir: Path) -> str:
             if title:
                 parts.append(title)
         description = str(data.get("description") or "").strip()
+        # The Bots UI seeds a new bot's description FROM its title, so joining
+        # both blindly renders "X — X — X" in a block that lives in every
+        # teammate's eternal prompt (observed on 5 of 12 profiles on a real
+        # fleet). Drop the description when the title already covers it, and
+        # strip a leading title echo when the rest still adds information.
+        if description and parts:
+            title_l = parts[0].casefold()
+            desc_l = description.casefold()
+            if title_l and title_l in desc_l:
+                remainder = _strip_title_echo(description, parts[0])
+                description = remainder
         if description:
             parts.append(description)
         line = " — ".join(parts)
@@ -156,15 +203,61 @@ def _profile_role(profile_dir: Path) -> str:
         return ""
 
 
+def _profile_capabilities(profile_dir: Path) -> list[str]:
+    """Capability tags for a teammate: its installed skill CATEGORIES.
+
+    The skills tree is ``skills/<category>/<skill>/SKILL.md``, and the
+    category directories are already the semantic domains a handoff wants to
+    route on (``security``, ``research``, ``devops``, ``governance``). Reading
+    only the top level is a deliberate cost decision: this runs inside
+    :func:`capability_fingerprint`, which is intentionally uncached and
+    therefore executes on EVERY Bot Chat turn, for every profile on the
+    install. On a 12-profile / 875-skill fleet a recursive ``**/SKILL.md``
+    walk measures ~20.7ms per call versus ~0.6ms for the top level — same
+    routing signal, ~37x cheaper.
+
+    Sorted (stable hashing) and capped, so one generalist teammate with 30
+    categories cannot inflate every other teammate's eternal prompt. Never
+    raises.
+    """
+    try:
+        skills_root = profile_dir / "skills"
+        if not skills_root.is_dir():
+            return []
+        names = sorted(
+            child.name
+            for child in skills_root.iterdir()
+            if child.is_dir() and not child.name.startswith(".")
+        )
+        return names[:_MAX_CAPABILITY_TAGS]
+    except OSError:
+        return []
+
+
 def _roster_lines(root: Path, me: str) -> list[str]:
-    """One '- `@handle` — role' line per teammate (excluding ``me``)."""
+    """One '- `@handle` — role [tags]' line per teammate (excluding ``me``)."""
     lines = []
     for name, profile_dir in _roster(root):
         if name == me:
             continue
         role = _profile_role(profile_dir)
         handle = _handle(name)
-        lines.append(f"- `@{handle}`" + (f" — {role}" if role else ""))
+        tags = _profile_capabilities(profile_dir)
+        line = f"- `@{handle}`" + (f" — {role}" if role else "")
+        if tags:
+            # Budget, not just a count: category names range from "security"
+            # to "context-verification-and-prompt-untrusted-input-defense", so
+            # a fixed tag count is not a bound on tokens. Keep whole tags.
+            kept: list[str] = []
+            used = 0
+            for tag in tags:
+                cost = len(tag) + 2  # ", "
+                if kept and used + cost > _MAX_CAPABILITY_CHARS:
+                    break
+                kept.append(tag)
+                used += cost
+            line += f" [{', '.join(kept)}]"
+        lines.append(line)
     return lines
 
 
@@ -278,7 +371,9 @@ def _build_section(home: Path) -> str:
         "with nothing to add, staying silent is fine — never ping-pong "
         "acknowledgements.\n"
         f"You are `@{handle}`. Your teammates (live roster; roles from their "
-        "profiles):\n"
+        "profiles, and in [brackets] the skill domains they actually have "
+        "installed — route a handoff to the teammate whose domains match the "
+        "work, not just whoever was named):\n"
         f"{roster_block}"
         + _remote_paragraph(root)
         + _peer_paragraph(root)
@@ -378,12 +473,22 @@ def capability_fingerprint(home: str | os.PathLike | None = None) -> str:
         surface["roster_roles"] = sorted(
             f"{n}:{_profile_role(d)}" for n, d in _roster(root)
         )
+        # Teammate CAPABILITY tags are rendered into the roster block too, so
+        # they must be hashed here or they would never refresh: installing a
+        # skill on `researcher` has to invalidate every OTHER bot's eternal
+        # prompt, not just researcher's own (the `skills` key above only
+        # covers this agent's home). Without this, every teammate would route
+        # handoffs off a capability list frozen at prompt-build time.
+        surface["roster_capabilities"] = sorted(
+            f"{n}:{','.join(_profile_capabilities(d))}" for n, d in _roster(root)
+        )
     except Exception:
         surface["roster"] = []
-    # Protocol-text version salt: bumping this refreshes every eternal Bot
+    # Protocol​-text version salt: bumping this refreshes every eternal Bot
     # Chat prompt ONCE so existing bots adopt a new protocol section (e.g.
     # the v2 message_agent tool replacing the shellout instructions).
-    surface["protocol_version"] = 2
+    # v3: roster lines carry capability tags + the routing instruction.
+    surface["protocol_version"] = 3
     try:
         # Peer gateways are part of the messaging surface: registering one
         # must refresh eternal Bot Chat prompts so the cross-machine DM

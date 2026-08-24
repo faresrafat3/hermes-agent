@@ -285,7 +285,7 @@ def test_relay_route_queues_envelope_and_spawns_waiter(tmp_path, monkeypatch):
 
     spawned = {}
 
-    def _fake_spawn(command, label, *, task_id, agent):
+    def _fake_spawn(command, label, *, task_id, agent, handoff=None):
         spawned["command"] = command
         spawned["label"] = label
         return json.dumps({"status": "sent", "to": label})

@@ -278,3 +278,165 @@ def test_fingerprint_changes_when_a_peer_is_registered(tmp_path):
     )
     after = bot_mode_probe.capability_fingerprint(home)
     assert before != after
+
+
+# ── capability tags on the roster (handoff routing) ──────────────────────────
+#
+# The roster block is the ONLY thing a bot reads to pick a handoff recipient.
+# Name + free-text role alone force the model to guess from a description, so a
+# teammate's actual installed skill domains are surfaced as bounded tags.
+
+
+def _give_skills(profile_dir, *categories):
+    """Install skill categories the way the real skills/ tree is laid out."""
+    for category in categories:
+        d = profile_dir / "skills" / category / f"{category}-helper"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(f"# {category}\n", encoding="utf-8")
+
+
+def test_roster_line_carries_teammate_capability_tags(tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    researcher = _make_bot_profile(home, "researcher", managed=True)
+    _give_skills(researcher, "research", "github")
+
+    section = bot_mode_probe.get_bot_mode_protocol_section(home)
+    assert "`@researcher`" in section
+    # Tags let a handoff be routed by capability, not just by @name.
+    assert "research" in section
+    assert "github" in section
+
+
+def test_capability_tags_are_bounded_not_a_full_dump(tmp_path):
+    """A 30-category teammate must not blow up every teammate's prompt.
+
+    Shaped like the real fleet: a long role AND many long category names. An
+    earlier version of this test used a role-less profile and therefore missed
+    that the role text is the dominant term.
+    """
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    big = _make_bot_profile(home, "generalist", managed=True)
+    (big / "profile.yaml").write_text(
+        textwrap.dedent(
+            """\
+            description: >-
+              Broad generalist spanning software development, debugging, code review,
+              GitHub PR and issue workflows, research and paper writing with citations,
+              and document processing across many formats
+            ui_meta:
+              hermes-bots:
+                title: generalist
+            """
+        ),
+        encoding="utf-8",
+    )
+    _give_skills(
+        big,
+        *[f"context-verification-and-prompt-untrusted-input-defense-{i:02d}" for i in range(30)],
+    )
+
+    line = next(
+        ln for ln in bot_mode_probe._roster_lines(home, "default") if "generalist" in ln
+    )
+    # The bound is structural, not a guessed number: handle + role cap (160)
+    # + tag budget (96) + separators. Verified against the real 12-profile
+    # fleet, whose widest line lands at 263.
+    budget = len("- `@generalist` — ") + 160 + len(" []") + 96
+    assert len(line) <= budget, f"roster line unbounded: {len(line)} > {budget}"
+
+
+def test_role_does_not_repeat_a_title_already_in_the_description(tmp_path):
+    """Real-fleet bug: the role read 'X — X — X'.
+
+    _profile_role joins the Bot Mode title and the profile description, but
+    users routinely set the description to text that already opens with the
+    title (the Bots UI seeds it that way). Joining blindly triples the words in
+    a block that lives in EVERY teammate's eternal prompt.
+    """
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    d = _make_bot_profile(home, "plugin-manager", managed=True)
+    (d / "profile.yaml").write_text(
+        textwrap.dedent(
+            """\
+            description: plugin manager — plugin manager
+            ui_meta:
+              hermes-bots:
+                title: plugin manager
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    role = bot_mode_probe._profile_role(d)
+    assert role.lower().count("plugin manager") == 1, f"duplicated role text: {role!r}"
+
+
+def test_role_still_joins_a_title_and_a_distinct_description(tmp_path):
+    """The dedupe must not swallow a description that adds real information."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    d = _make_bot_profile(home, "researcher", managed=True)
+    (d / "profile.yaml").write_text(
+        textwrap.dedent(
+            """\
+            description: reads papers and verifies citations
+            ui_meta:
+              hermes-bots:
+                title: Research Lead
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    role = bot_mode_probe._profile_role(d)
+    assert "Research Lead" in role
+    assert "verifies citations" in role
+
+
+def test_roster_line_has_no_tag_suffix_for_skill_less_teammate(tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    _make_bot_profile(home, "bare", managed=True)
+
+    line = next(ln for ln in bot_mode_probe._roster_lines(home, "default") if "bare" in ln)
+    assert line.strip() == "- `@bare`"
+
+
+def test_fingerprint_covers_a_TEAMMATES_capability_change(tmp_path):
+    """The load-bearing invariant.
+
+    capability_fingerprint() is what decides whether an eternal Bot Chat prompt
+    gets rebuilt. If teammate tags render into the roster block but the
+    fingerprint only hashes the agent's OWN surface, then installing a skill on
+    `researcher` never refreshes `default`'s prompt — every other bot keeps
+    routing handoffs off a stale capability list forever.
+    """
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    researcher = _make_bot_profile(home, "researcher", managed=True)
+    _give_skills(researcher, "research")
+
+    before = bot_mode_probe.capability_fingerprint(home)
+    _give_skills(researcher, "security")  # teammate gains a capability
+    after = bot_mode_probe.capability_fingerprint(home)
+
+    assert before != after, "a teammate's capability change did not refresh the prompt"
+
+
+def test_fingerprint_is_stable_when_nothing_changed(tmp_path):
+    """Cache safety: an unchanged surface must hash identically.
+
+    A fingerprint that drifts on its own rebuilds the system prompt every turn
+    and destroys per-conversation prompt caching.
+    """
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    researcher = _make_bot_profile(home, "researcher", managed=True)
+    _give_skills(researcher, "research", "github")
+
+    first = bot_mode_probe.capability_fingerprint(home)
+    for _ in range(4):
+        assert bot_mode_probe.capability_fingerprint(home) == first
