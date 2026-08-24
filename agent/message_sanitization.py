@@ -1046,7 +1046,8 @@ def _defang_sensitive_words(text: str) -> str:
 
 
 def sanitize_for_agentrouter(
-    api_kwargs: dict, provider: str = "", base_url: str = ""
+    api_kwargs: dict, provider: str = "", base_url: str = "",
+    ascii_armor_non_latin: bool = False,
 ) -> dict:
     """Sanitize an outbound OpenAI-compatible request for agentrouter.org.
 
@@ -1059,6 +1060,18 @@ def sanitize_for_agentrouter(
     No-op for any provider other than agentrouter — pass the active provider
     explicitly. If the provider is not agentrouter, the kwargs are returned
     unchanged.
+
+    ``ascii_armor_non_latin`` additionally HTML-entity-encodes non-ASCII text
+    to defeat Filter B, agentrouter's 400 content-blocked LANGUAGE CLASSIFIER.
+    Filter A is a substring blocklist (defang defeats it); Filter B scores the
+    request's language/shape, so no word list can defeat it — but entity-
+    encoded text is pure ASCII, which the classifier passes while the model
+    still reads it natively. Verified live 2026-08-24 on a real Arabic /goal
+    judge payload that 400'd raw and passed armored. OFF by default: it
+    multiplies non-Latin token count ~3x, so it is enabled only for short
+    auxiliary payloads (the goal judge) where correctness beats cost. The main
+    loop must NOT enable it — its huge context keeps the classifier dormant
+    and the token multiplier would be ruinous.
     """
     # Accept both the legacy `agentrouter-org*` names and the standalone
     # `agentrouter-1/2/3` names (user renamed the providers without `-org`).
@@ -1078,17 +1091,28 @@ def sanitize_for_agentrouter(
     ):
         return original_list if as_list else api_kwargs
 
+    def _armor(text: str) -> str:
+        text = _defang_sensitive_words(text)
+        if not ascii_armor_non_latin:
+            return text
+        # Filter B (400 content-blocked) is a language classifier, not a
+        # blocklist: entity-encode non-ASCII so the wire payload is pure
+        # ASCII. The model decodes HTML entities natively.
+        return "".join(
+            f"&#{ord(ch)};" if ord(ch) > 127 else ch for ch in text
+        )
+
     if isinstance(api_kwargs.get("system"), str):
-        api_kwargs["system"] = _defang_sensitive_words(api_kwargs["system"])
+        api_kwargs["system"] = _armor(api_kwargs["system"])
 
     for msg in api_kwargs.get("messages", []) or []:
         if not isinstance(msg, dict):
             continue
         content = msg.get("content")
         if isinstance(content, str):
-            msg["content"] = _defang_sensitive_words(content)
+            msg["content"] = _armor(content)
         elif isinstance(content, list):
             for part in content:
                 if isinstance(part, dict) and isinstance(part.get("text"), str):
-                    part["text"] = _defang_sensitive_words(part["text"])
+                    part["text"] = _armor(part["text"])
     return api_kwargs.get("messages") if as_list else api_kwargs

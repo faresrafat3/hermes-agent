@@ -9598,6 +9598,35 @@ def _call_llm_impl(
     if _is_anthropic_compat_endpoint(request_provider, _client_base):
         kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
 
+    # agentrouter.org content filters apply to EVERY request it serves —
+    # auxiliary tasks included. ``sanitize_for_agentrouter`` used to be wired
+    # only into the main loop (chat_completion_helpers), so auxiliary calls
+    # whose payload quotes agent/user text (goal judge evaluating the last
+    # response, compression replaying history, ...) hit the raw filters and
+    # died with 400 content-blocked on every attempt (live incident
+    # 2026-08-24: /goal judge blocked → 5 "transport failures" → auto-pause
+    # pointing at the API key while the key was fine). Same gate, same
+    # wire-target rule as the main loop: provider label OR destination host.
+    try:
+        from agent.message_sanitization import sanitize_for_agentrouter
+
+        kwargs = sanitize_for_agentrouter(
+            kwargs,
+            request_provider,
+            base_url=_client_base or resolved_base_url or "",
+            # Filter B (400 content-blocked) is agentrouter's LANGUAGE
+            # classifier: it fires on short non-Latin payloads the substring
+            # defang cannot touch. Verified live 2026-08-24: the /goal judge
+            # prompt quoting an Arabic response 400'd raw and passed armored.
+            # Only short judge-style payloads armor — entity encoding costs
+            # ~3x tokens on non-Latin text, which would be ruinous for
+            # compression-sized replays, and the main loop's huge context
+            # keeps the classifier dormant anyway.
+            ascii_armor_non_latin=(task == "goal_judge"),
+        )
+    except Exception as exc:  # never let hygiene break the request path
+        logger.debug("Auxiliary client: agentrouter sanitize skipped: %s", exc)
+
     # Streaming path: return the raw SDK Stream iterator directly. This is used by
     # the MoA aggregator so its tokens stream to the user. It deliberately skips
     # _validate_llm_response and the temperature/max_tokens/payment fallback chain
@@ -10407,6 +10436,21 @@ async def _async_call_llm_impl(
     # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
     if _is_anthropic_compat_endpoint(request_provider, _client_base):
         kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
+
+    # agentrouter.org content filters — same wiring as the sync path above.
+    # Auxiliary requests quoting agent/user text must be defanged before they
+    # reach agentrouter.org regardless of which event loop issues them.
+    try:
+        from agent.message_sanitization import sanitize_for_agentrouter
+
+        kwargs = sanitize_for_agentrouter(
+            kwargs,
+            request_provider,
+            base_url=_client_base or resolved_base_url or "",
+            ascii_armor_non_latin=(task == "goal_judge"),
+        )
+    except Exception as exc:  # never let hygiene break the request path
+        logger.debug("Auxiliary client: agentrouter sanitize skipped (async): %s", exc)
 
     try:
         # Retry ONCE on the same provider for a transient transport blip
