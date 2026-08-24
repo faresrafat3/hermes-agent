@@ -184,6 +184,10 @@ COMMAND_REGISTRY: list[CommandDef] = [
                busy_policy="interrupt_then_dispatch", busy_handler="stop"),
     CommandDef("pause", "Pause new work globally (emergency stop); '/pause off' resumes", "Session",
                gateway_only=True, args_hint="[reason | off]",
+               # Spaced-prose hint: the args_hint fallback regex needs unspaced
+               # pipes, so declare the verb explicitly. 'off' is the resume verb
+               # _handle_pause_command accepts (alongside resume/stop/disengage).
+               subcommands=("off",),
                busy_policy="dispatch"),
     CommandDef("approve", "Approve a pending dangerous command", "Session",
                gateway_only=True, args_hint="[session|always]", busy_policy="dispatch"),
@@ -204,6 +208,14 @@ COMMAND_REGISTRY: list[CommandDef] = [
                args_hint="<prompt>", busy_policy="dispatch", busy_handler="steer"),
     CommandDef("goal", "Set a standing goal Hermes works on across turns until achieved", "Session",
                args_hint="[text | draft <text> | show | gate add <cmd> | pause | resume | clear | status | wait <pid> | unwait]",
+               # Explicit, because the args_hint fallback regex in this module
+               # only matches pipes with NO surrounding spaces ("on|off|status").
+               # This hint is spaced prose, so /goal silently produced NO
+               # completions at all — including `gate`, the one deterministic
+               # refusal mechanism. Verbs below are the ones
+               # cli_commands_mixin._handle_goal_command actually dispatches.
+               subcommands=("draft", "show", "gate", "pause", "resume",
+                            "clear", "status", "wait", "unwait"),
                busy_policy="dispatch", busy_handler="goal"),
     CommandDef("heartbeat", "Set a recurring prompt that re-enters this session when idle", "Session",
                aliases=("hb",), args_hint="[every <interval> <prompt> | status | pause | resume | clear]",
@@ -215,12 +227,22 @@ COMMAND_REGISTRY: list[CommandDef] = [
                args_hint="[review instructions]"),
     CommandDef("loop", "Re-run a prompt on a recurring interval in this session", "Session",
                aliases=("proactive",),
-               args_hint="[interval] <prompt> [--times N] [--until <condition>] | status | pause | resume | stop",
+               args_hint="[interval] <prompt> [--times N] [--until <condition>] | status | pause | resume | stop | clear | cancel",
+               # Spaced-prose hint: declare explicitly (see /goal above). Verbs
+               # are the ones hermes_cli/loops.py dispatches — it treats
+               # stop/clear/cancel as equivalent, so the hint names all three
+               # rather than advertising only one of a set it accepts.
+               subcommands=("status", "pause", "resume", "stop", "clear", "cancel"),
                busy_policy="dispatch", busy_handler="loop"),
     CommandDef("moa", "Run one prompt through the default Mixture of Agents preset, then restore your model", "Session",
                args_hint="<prompt>", busy_policy="reject", busy_handler="moa"),
     CommandDef("subgoal", "Add or manage extra criteria on the active goal", "Session",
-               args_hint="[text | remove N | clear]", busy_policy="dispatch"),
+               args_hint="[text | remove N | clear]",
+               # Explicit for the same reason as /goal above: this spaced-prose
+               # hint yields nothing from the fallback regex. Verbs are the ones
+               # cli_commands_mixin._handle_subgoal_command dispatches.
+               subcommands=("remove", "clear"),
+               busy_policy="dispatch"),
     CommandDef("status", "Show session, model, token, and context info", "Session",
                busy_policy="dispatch"),
     CommandDef("egress", "Show Docker egress proxy status", "Session",
