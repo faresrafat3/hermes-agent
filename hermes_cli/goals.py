@@ -561,6 +561,13 @@ class GoalState:
     # 401 every call — track them separately so the loop auto-pauses instead
     # of burning every turn budget slot on an unreachable judge.
     consecutive_transport_failures: int = 0   # judge API/transport errors in a row
+    # M3 per-goal token budget: None = unlimited (turn budget remains the only
+    # cap). When set, the driver accumulates the agent's session token usage
+    # into ``tokens_used`` after each turn; crossing the budget auto-pauses
+    # with a usage_limited reason instead of continuing to spend. Backwards-
+    # compatible: old state_meta rows load with both unset.
+    token_budget: Optional[int] = None
+    tokens_used: int = 0
     # User-added criteria appended mid-loop via the /subgoal command.
     # When non-empty the judge prompt and continuation prompt both
     # include them so the agent works toward them and the judge factors
@@ -624,6 +631,10 @@ class GoalState:
             paused_reason=data.get("paused_reason"),
             consecutive_parse_failures=int(data.get("consecutive_parse_failures", 0) or 0),
             consecutive_transport_failures=int(data.get("consecutive_transport_failures", 0) or 0),
+            token_budget=(
+                int(data["token_budget"]) if data.get("token_budget") else None
+            ),
+            tokens_used=int(data.get("tokens_used", 0) or 0),
             subgoals=subgoals,
             waiting_on_pid=(int(data["waiting_on_pid"]) if data.get("waiting_on_pid") else None),
             waiting_on_session=(str(data["waiting_on_session"]) if data.get("waiting_on_session") else None),
@@ -1023,6 +1034,28 @@ def _goal_judge_timeout() -> float:
     return DEFAULT_JUDGE_TIMEOUT
 
 
+def _goal_judge_fallback() -> Tuple[Optional[str], Optional[str]]:
+    """Resolve auxiliary.goal_judge.fallback_provider / fallback_model.
+
+    M3 of /goal long-horizon: when the primary judge endpoint is unreachable
+    (transport failure — auth, DNS, timeout), a configured fallback gives the
+    loop a second chance before auto-pausing. Both keys are optional and
+    independent; a provider without a model lets call_llm resolve that
+    provider's default model. Returns ``(provider_or_None, model_or_None)``.
+    Malformed values are treated as unset rather than crashing the loop.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        task_cfg = (cfg.get("auxiliary") or {}).get("goal_judge", {}) or {}
+        provider = str(task_cfg.get("fallback_provider") or "").strip() or None
+        model = str(task_cfg.get("fallback_model") or "").strip() or None
+        return provider, model
+    except Exception:
+        return None, None
+
+
 def _parse_judge_response(raw: str) -> Tuple[str, str, bool, Optional[Dict[str, Any]]]:
     """Parse the judge's reply. Fail-open on unusable output.
 
@@ -1284,9 +1317,42 @@ def judge_goal(
             max_tokens=_goal_judge_max_tokens(),
             timeout=timeout,
         )
-    except Exception as exc:
-        logger.info("goal judge: API call failed (%s) — falling through to continue", exc)
-        return "continue", f"judge error: {type(exc).__name__}", False, None, True
+    except Exception as primary_exc:
+        # M3 judge fallback: a configured auxiliary.goal_judge
+        # .fallback_provider/.fallback_model gets one retry before the loop
+        # fails open. Covers transient primary-endpoint failures (auth 401,
+        # DNS, timeout) that would otherwise count toward auto-pause.
+        fb_provider, fb_model = _goal_judge_fallback()
+        if not fb_provider and not fb_model:
+            logger.info(
+                "goal judge: API call failed (%s) — no fallback configured, "
+                "falling through to continue",
+                primary_exc,
+            )
+            return "continue", f"judge error: {type(primary_exc).__name__}", False, None, True
+        logger.info(
+            "goal judge: primary failed (%s) — trying fallback provider=%r model=%r",
+            primary_exc, fb_provider, fb_model,
+        )
+        try:
+            resp = call_llm(
+                task="goal_judge",
+                provider=fb_provider,
+                model=fb_model,
+                messages=[
+                    {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+                max_tokens=_goal_judge_max_tokens(),
+                timeout=timeout,
+            )
+        except Exception as fallback_exc:
+            logger.info(
+                "goal judge: fallback also failed (%s) — falling through to continue",
+                fallback_exc,
+            )
+            return "continue", f"judge error: {type(fallback_exc).__name__}", False, None, True
 
     try:
         raw = resp.choices[0].message.content or ""
@@ -1498,6 +1564,23 @@ class GoalManager:
         if self._state is None:
             return None
         self._state.contract = contract or GoalContract()
+        save_goal(self.session_id, self._state)
+        return self._state
+
+    def set_token_budget(self, tokens: Optional[int]) -> Optional[GoalState]:
+        """Set (or clear, with None/0) the per-goal token budget. M3.
+
+        The budget caps cumulative session token spend across the whole goal
+        lifetime; crossing it auto-pauses with a usage_limited reason. Pass a
+        larger value later via /goal set-token-budget to continue.
+        Returns the updated state, or None when there is no goal.
+        """
+        if self._state is None:
+            return None
+        if tokens is None or int(tokens) <= 0:
+            self._state.token_budget = None
+        else:
+            self._state.token_budget = int(tokens)
         save_goal(self.session_id, self._state)
         return self._state
 
@@ -1979,6 +2062,48 @@ class GoalManager:
         # Count the turn that just finished.
         state.turns_used += 1
         state.last_turn_at = time.time()
+
+        # M3 per-goal token budget: accumulate this turn's usage and pause
+        # when the budget is crossed. Read from the live agent's session
+        # usage snapshot (fail-open: any error leaves tokens_used unchanged
+        # and the turn budget remains the only cap). Checked before the
+        # quality gates so a spent-out goal doesn't keep tripping gates.
+        if state.token_budget:
+            try:
+                agent = getattr(self, "agent", None)
+                usage = {}
+                getter = getattr(agent, "get_session_usage_snapshot", None)
+                if callable(getter):
+                    usage = getter() or {}
+                else:
+                    usage = {
+                        "total": getattr(agent, "session_total_tokens", 0) or 0,
+                    }
+                turn_total = int(usage.get("total") or 0)
+                if turn_total > state.tokens_used:
+                    state.tokens_used = turn_total
+            except Exception as exc:
+                logger.debug("goal token accounting failed: %s", exc)
+            if state.tokens_used >= int(state.token_budget):
+                state.status = "paused"
+                state.paused_reason = (
+                    f"token budget exhausted "
+                    f"({state.tokens_used}/{state.token_budget} tokens)"
+                )
+                save_goal(self.session_id, state)
+                return {
+                    "status": "paused",
+                    "should_continue": False,
+                    "continuation_prompt": None,
+                    "verdict": "continue",
+                    "reason": state.paused_reason,
+                    "message": (
+                        f"⏸ Goal paused — token budget exhausted "
+                        f"({state.tokens_used}/{state.token_budget} tokens). "
+                        "Use /goal set-token-budget to raise it, or /goal resume "
+                        "(which keeps the current budget)."
+                    ),
+                }
 
         # Quality gates run BEFORE the LLM judge: a failing gate is
         # deterministic evidence the goal is not done, so the judge call is

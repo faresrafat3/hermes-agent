@@ -238,6 +238,31 @@ auxiliary:
 
 The judge call is small (~200 output tokens) and runs once per turn, so a cheap fast model is usually the right call.
 
+### Judge fallback
+
+If the primary judge endpoint becomes unreachable (auth failure, DNS, timeout), the loop can try a fallback before failing open. Configure it next to the primary override:
+
+```yaml
+auxiliary:
+  goal_judge:
+    provider: openrouter
+    model: google/gemini-3-flash-preview
+    fallback_provider: deepseek      # optional
+    fallback_model: deepseek-v4-flash # optional
+```
+
+Without a fallback, transport failures fail open (verdict `continue`) and N consecutive failures auto-pause the goal — unchanged behavior. With a fallback, one retry against it happens first; only if that also fails does the turn count as a transport failure.
+
+### Per-goal token budget
+
+Cap how much a single goal may spend across its whole lifetime:
+
+```
+/goal set-token-budget 500000
+```
+
+After each turn the goal accumulates the session's token usage; crossing the budget auto-pauses with a `token budget exhausted` reason (the turn already spent still counts). Raise the budget with `/goal set-token-budget <n>` again, or clear it with `/goal set-token-budget 0`. Without a budget the turn budget (`goals.max_turns`) remains the only cap.
+
 ## Example walkthrough
 
 ```
