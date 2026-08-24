@@ -210,6 +210,25 @@ wrote the record above and returned the matching `handoff_id` in its ack
 "Who owes whom what" is now answerable by reading one JSONL file instead of
 inferring from message-count deltas in `session.resume` polling.
 
+**Read side: `hermes handoffs`** (`hermes_cli/subcommands/handoffs.py`,
+registered in `main.py` + `_BUILTIN_SUBCOMMANDS` — the argparse/registry
+parity tripwire covers the pairing):
+
+```
+$ hermes handoffs list
+id                   age  from             to                   transport process
+----------------------------------------------------------------------------------------
+4edc63d3a22d4ee0      0s  default          c3-economist         local     proc_demo1
+64e2eb9e83444839      0s  leader           dixie                relay     - envelope:eeeeeeeeeeee
+
+2 record(s)
+```
+
+- `list --json` — machine-readable; `list --to <agent>` — filter by target
+- `sweep` — apply the relay staleness clock manually (the gateway loop already
+  does this hourly)
+- verified live on the real install: empty state, populated list, filter, sweep
+
 ## 4. Where A2A actually belongs in this fleet
 
 **At the machine boundary — not inside it.**
