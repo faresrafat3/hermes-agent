@@ -824,6 +824,13 @@ class TestFTS5Search:
         traced_connections = [db._conn]
         if read_conn is not db._conn:
             traced_connections.append(read_conn)
+            # Return the probe connection to the pool, exactly like the
+            # production _read_ctx checkout/return cycle. Without this the
+            # pool is empty at search time, so _read_ctx opens a FRESH
+            # untraced read connection and the context query never shows up
+            # on our traced set (measured live 2026-08-24: WITH TARGET count
+            # 0 with the probe held, 1 with it returned).
+            db._read_pool.put_nowait(read_conn)
         for conn in traced_connections:
             conn.set_trace_callback(statements.append)
 

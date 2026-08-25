@@ -28,6 +28,14 @@ def _run_cold_start(monkeypatch, capsys, *, surviving_pids):
         "find_gateway_pids",
         lambda all_profiles=False: [] if all_profiles else surviving_pids,
     )
+    # Isolate the Desktop-ownership gate: on a dev box where the Desktop app
+    # is actually running (measured live 2026-08-24), the ledger/venv scan
+    # reports a live serve control plane and the cold-start returns silently
+    # before reaching the spawn path under test. These tests assert the
+    # spawn/liveness-report logic, not ownership arbitration.
+    monkeypatch.setattr(
+        update_cmd, "_desktop_owns_gateway_lifecycle", lambda: False
+    )
     monkeypatch.setattr(gateway_windows, "_spawn_detached", lambda: 4242)
     # Avoid the real 6s/0.4s poll loop in _report_gateway_start.
     monkeypatch.setattr(

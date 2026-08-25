@@ -156,9 +156,31 @@ class TestCustomProviderPoolLoopbackNoKeyExemption:
 
 
 def test_qwen_oauth_auto_fallthrough_on_auth_failure(monkeypatch):
-    """When requested_provider is 'auto' and Qwen creds fail, fall through."""
+    """When requested_provider is 'auto' and Qwen creds fail, fall through.
+
+    The credential-pool path (runtime_provider.py:2055) serves qwen-oauth
+    from a live pool entry BEFORE the resolve_qwen_runtime_credentials branch
+    this test mocks. A machine holding a live qwen pool entry (e.g.
+    fares/local-patches since 2026-08) would short-circuit with
+    provider='qwen-oauth' and the fall-through under test would never run.
+    Empty the pool so the resolution actually reaches the branch we stub.
+    """
     from hermes_cli.auth import AuthError
 
+    class _EmptyPool:
+        def current(self):
+            return None
+
+        def try_refresh_current(self):
+            return None
+
+        def has_credentials(self):
+            return False
+
+        def __bool__(self):
+            return False
+
+    monkeypatch.setattr(rp, "load_pool", lambda _provider: _EmptyPool())
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "qwen-oauth")
     monkeypatch.setattr(
         rp,

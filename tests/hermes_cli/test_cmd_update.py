@@ -2,6 +2,7 @@
 
 import hashlib
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import ANY, patch
 
@@ -75,18 +76,13 @@ def _patch_managed_uv(request):
 def _patch_gateway_discovery():
     """Keep cmd_update's gateway auto-restart phase off this machine's gateways.
 
-    The restart phase used to swallow every exception at debug level, so these
-    end-to-end tests never noticed it touching real gateway discovery. Since
-    the phase is surfaced (#78574: an aborted restart now fails the update),
-    an unmocked ``find_gateway_pids`` on a box with a live gateway reaches the
-    conftest live-system guard and turns into a spurious ``sys.exit(1)``.
-    Discovery returning nothing makes the phase a clean no-op for every test
-    in this module (none of them assert on gateway restarts).
+    Superseded by the shared ``_update_pipeline_gateway_inert`` autouse
+    fixture in tests/hermes_cli/conftest.py, which covers this module AND the
+    other update-family files (yes_flag/autostash/head_moved_gate) with the
+    full measured fix: purge-neutering + kill-surface inerting. This alias
+    stays for tests that reference it directly.
     """
-    with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
-         patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
-         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]):
-        yield
+    yield
 
 
 class TestCmdUpdateNpmLockfileCache:

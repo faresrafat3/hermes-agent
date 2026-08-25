@@ -54,3 +54,75 @@ def _suppress_concurrent_hermes_gate(request, monkeypatch):
         lambda *_a, **_k: [],
         raising=False,
     )
+
+
+_UPDATE_PIPELINE_TEST_MODULES = (
+    "test_cmd_update",
+    "test_update_yes_flag",
+    "test_update_autostash",
+    "test_update_head_moved_gate",
+)
+
+
+@pytest.fixture(autouse=True)
+def _update_pipeline_gateway_inert(request, monkeypatch):
+    """Make the update pipeline's gateway-kill surface inert — scoped to the
+    update-family test modules ONLY.
+
+    Measured live 2026-08-24 on fares/local-patches (a box running the real
+    fleet): these tests drive the REAL ``hermes update`` pipeline against the
+    LIVE checkout. After the simulated pull,
+    ``_purge_stale_hermes_modules()`` drops every cached hermes_cli/gateway
+    module from sys.modules — killing both module-level mocks and any mock a
+    plain fixture set earlier. The restart phase's function-level imports then
+    re-execute the real hermes_cli.gateway, whose systemd discovery finds the
+    machine's actual hermes-gateway.service MainPID and attempts a real
+    SIGTERM on it (blocked by the conftest live-system guard → spurious exit
+    1; green in CI only because CI runs no fleet).
+
+    The purge is neutered because no pull actually happens under pytest —
+    there is nothing stale to evict — which keeps per-test monkeypatches
+    alive for the whole run. Scoped to the update-family modules because the
+    purge-neutering breaks tests that assert the purge itself
+    (test_update_stale_module_purge) and would silently change behavior for
+    unrelated suites in this directory.
+    """
+    node_module = request.module.__name__.rsplit(".", 1)[-1]
+    if node_module not in _UPDATE_PIPELINE_TEST_MODULES:
+        yield
+        return
+
+    import hermes_cli.gateway as hermes_gateway
+
+    def _no_purge() -> None:
+        return None
+
+    monkeypatch.setattr(
+        "hermes_cli.update_cmd._purge_stale_hermes_modules", _no_purge
+    )
+    monkeypatch.setattr(hermes_gateway, "find_gateway_pids", lambda *a, **k: [])
+    monkeypatch.setattr(
+        hermes_gateway, "supports_systemd_services", lambda: False
+    )
+    monkeypatch.setattr(
+        hermes_gateway, "find_profile_gateway_processes", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        hermes_gateway, "_get_service_pids", lambda *a, **k: set()
+    )
+    monkeypatch.setattr(
+        hermes_gateway, "_escalate_wedged_gateway", lambda pid, **k: True
+    )
+    monkeypatch.setattr(
+        hermes_gateway, "_graceful_restart_via_sigusr1", lambda pid, **k: True
+    )
+    try:
+        import gateway.status as gw_status
+
+        monkeypatch.setattr(
+            gw_status, "terminate_pid", lambda pid, **k: None, raising=False
+        )
+    except Exception:
+        pass
+    yield
+
