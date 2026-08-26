@@ -440,3 +440,36 @@ def test_fingerprint_is_stable_when_nothing_changed(tmp_path):
     first = bot_mode_probe.capability_fingerprint(home)
     for _ in range(4):
         assert bot_mode_probe.capability_fingerprint(home) == first
+
+
+def test_probe_never_imports_user_plugin_modules(tmp_path, monkeypatch):
+    """The core probe must never reach into ~/.hermes/plugins to build text.
+
+    Fleet awareness belongs to the fleet-registry plugin via the generic
+    register_system_prompt_section() surface. If the probe ever imports
+    plugin code directly (sys.path insertion + ``from skill import ...``),
+    then: named profiles break (the path hardcodes Path.home()/".hermes"),
+    a generic top-level module name like ``skill`` can be shadowed by any
+    user plugin, and this suite would render REAL fleet state on a live
+    host instead of the fixture's.
+    """
+    import sys
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    _make_bot_profile(home, "researcher", managed=True)
+
+    banned = ("skill", "core", "index", "self_update")
+    stashed = {name: sys.modules.pop(name) for name in banned if name in sys.modules}
+    path_before = list(sys.path)
+    # Even a hijacked/explicit Path.home() must not give the probe a plugin
+    # directory to load: the fixture home is under tmp_path, not the real one.
+    monkeypatch.setattr(bot_mode_probe.Path, "home", lambda: tmp_path)
+    try:
+        bot_mode_probe.get_bot_mode_protocol_section(home)
+        leaked = [name for name in banned if name in sys.modules]
+        assert not leaked, f"probe imported user-plugin modules: {leaked}"
+        assert sys.path == path_before, "probe mutated sys.path"
+    finally:
+        for name, mod in stashed.items():
+            sys.modules.setdefault(name, mod)
