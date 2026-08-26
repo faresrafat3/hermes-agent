@@ -38,6 +38,9 @@ data/
 !hermes_cli/data/plugin_index.json
 .pytest_cache/
 test_durations.json
+# Local experiment run logs / one-off captures (dates in dirname).
+runs/
+.pytest_cache/
 .pytest-cache/
 tmp/
 temp_vision_images/
