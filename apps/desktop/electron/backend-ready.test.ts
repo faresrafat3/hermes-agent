@@ -260,3 +260,28 @@ test('exit-before-announcement error stays clean when no output was buffered', a
     return true
   })
 })
+
+test('waitForDashboardPortAnnouncement resolves immediately when outputTail already contains announcement', async () => {
+  const child = makeFakeChild()
+  const mockTail = {
+    text: () => 'some early startup noise\nHERMES_BACKEND_READY port=38765\nbackend listening...'
+  }
+
+  const port = await waitForDashboardPortAnnouncement(child, {
+    outputTail: mockTail,
+    timeoutMs: 1000
+  })
+
+  assert.equal(port, 38765)
+})
+
+test('waitForDashboardPortAnnouncement resolves from describeOutputTail fallback if outputTail has no text()', async () => {
+  const child = makeFakeChild()
+
+  const port = await waitForDashboardPortAnnouncement(child, {
+    describeOutputTail: () => '\nRecent backend output:\nHERMES_DASHBOARD_READY port=24680\n',
+    timeoutMs: 1000
+  })
+
+  assert.equal(port, 24680)
+})

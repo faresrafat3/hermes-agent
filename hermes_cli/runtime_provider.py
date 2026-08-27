@@ -729,17 +729,11 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
     if requested_norm != "custom" and not requested_norm.startswith("custom:"):
         try:
             canonical = auth_mod.resolve_provider(requested_norm)
-        except AuthError:
-            pass
+        except Exception:
+            # Unknown provider (not built-in) — fall through to config scan
+            # so user-defined providers in config.yaml are found.
+            canonical = None
         else:
-            # A user-declared ``custom_providers`` entry whose name matches
-            # only an *alias* (``kimi`` → built-in ``kimi-coding``) is the
-            # user's intended target — alias rewriting would otherwise hijack
-            # the request.  We only defer to the built-in when the raw name is
-            # the canonical provider itself (``nous``, ``openrouter``, …) so
-            # accidentally shadowing a canonical provider still resolves to
-            # the built-in. See tests/hermes_cli/test_runtime_provider_resolution.py
-            # ``test_named_custom_provider_does_not_shadow_builtin_provider``.
             if (canonical or "").strip().lower() == requested_norm:
                 return None
 
@@ -762,6 +756,13 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             key_env = str(
                 entry.get("key_env") or entry.get("api_key_env") or ""
             ).strip()
+            # Support comma-separated key_env lists for credential pooling:
+            # split, pick one key per process via PID-based round-robin so
+            # concurrent subagents each use a different credential.
+            key_env_list = [k.strip() for k in key_env.split(",") if k.strip()]
+            if len(key_env_list) > 1:
+                import os
+                key_env = key_env_list[os.getpid() % len(key_env_list)]
             resolved_api_key = _getenv(key_env, "").strip() if key_env else ""
             # Fall back to inline api_key when key_env is absent or unresolvable
             if not resolved_api_key:
@@ -1935,11 +1936,14 @@ def resolve_runtime_provider(
                 runtime["requested_provider"] = requested_provider
                 return runtime
 
-    provider = resolve_provider(
-        requested_provider,
-        explicit_api_key=explicit_api_key,
-        explicit_base_url=explicit_base_url,
-    )
+    try:
+        provider = resolve_provider(
+            requested_provider,
+            explicit_api_key=explicit_api_key,
+            explicit_base_url=explicit_base_url,
+        )
+    except Exception:
+        provider = "custom"  # Fall through to custom provider resolution
     model_cfg = _get_model_config()
 
     # OpenCode Zen free tier (*-free slugs, e.g. x-preview-f-free /

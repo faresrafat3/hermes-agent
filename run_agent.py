@@ -6022,6 +6022,11 @@ class AIAgent:
             key_env = str(custom_provider.get("key_env") or "").strip()
             if not key_env:
                 return False
+            key_env_list = [k.strip() for k in key_env.split(",") if k.strip()]
+            if len(key_env_list) > 1:
+                import os
+                _idx = os.getpid() % len(key_env_list)
+                key_env = key_env_list[_idx]
             api_key = get_env_prefer_dotenv(key_env).strip()
             if not api_key:
                 return False

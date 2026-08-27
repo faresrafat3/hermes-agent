@@ -1,9 +1,9 @@
 import fs from 'node:fs'
 
 // `hermes serve` announces HERMES_BACKEND_READY; the legacy `hermes dashboard`
-// backend announces HERMES_DASHBOARD_READY. Accept either so the desktop spawn
-// works against both the headless backend and old/dashboard runtimes.
-const _READY_RE = /^HERMES_(?:BACKEND|DASHBOARD)_READY port=(\d+)/m
+// backend announces HERMES_DASHBOARD_READY. Accept either anywhere in output
+// so color codes, partial lines, or prefix logs cannot block discovery.
+const _READY_RE = /HERMES_(?:BACKEND|DASHBOARD)_READY port=(\d+)/
 
 // The announcement clock starts the instant the backend process is spawned —
 // before uvicorn binds its socket. On a cold install the child must first
@@ -35,6 +35,19 @@ function resolvePortAnnounceTimeoutMs(env = process.env) {
 }
 
 /**
+ * Extract port number from output text if announced.
+ */
+function parseAnnouncedPort(text: string): number | null {
+  if (!text) {
+    return null
+  }
+
+  const m = text.match(_READY_RE)
+
+  return m ? parseInt(m[1], 10) : null
+}
+
+/**
  * Watch a child process's stdout for the `HERMES_(BACKEND|DASHBOARD)_READY
  * port=<N>` line that web_server.py prints after uvicorn binds its socket.
  *
@@ -51,10 +64,23 @@ function resolvePortAnnounceTimeoutMs(env = process.env) {
  * on every terminal path — resolve, reject, or timeout — so repeated
  * backend spawns don't leak listener slots on the child.
  */
-function waitForDashboardPort(child, timeoutMs = resolvePortAnnounceTimeoutMs(), describeOutputTail = () => '') {
+function waitForDashboardPort(
+  child,
+  timeoutMs = resolvePortAnnounceTimeoutMs(),
+  describeOutputTail = () => '',
+  outputTail?: { text?: () => string } | null
+) {
+  // Check if outputTail or describeOutputTail already captured the announcement
+  // before this promise was constructed (e.g. during an async claim step, #93608).
+  const prebuffered = parseAnnouncedPort(outputTail?.text?.() || '') ?? parseAnnouncedPort(describeOutputTail())
+  if (prebuffered !== null) {
+    return Promise.resolve(prebuffered)
+  }
+
   return new Promise((resolve, reject) => {
     let buf = ''
     let done = false
+    let pollInterval: NodeJS.Timeout | null = null
 
     function cleanup() {
       if (done) {
@@ -63,26 +89,43 @@ function waitForDashboardPort(child, timeoutMs = resolvePortAnnounceTimeoutMs(),
 
       done = true
       clearTimeout(timer)
-      child.stdout.off('data', onData)
-      child.off('exit', onExit)
-      child.off('error', onError)
+
+      if (pollInterval) {
+        clearInterval(pollInterval)
+      }
+
+      child.stdout?.off?.('data', onData)
+      child.off?.('exit', onExit)
+      child.off?.('error', onError)
+    }
+
+    function checkAndResolve(text: string) {
+      const port = parseAnnouncedPort(text)
+
+      if (port !== null) {
+        cleanup()
+        resolve(port)
+
+        return true
+      }
+
+      return false
     }
 
     function onData(chunk) {
       buf += chunk.toString()
-      let nl
+      checkAndResolve(buf)
+    }
 
-      while ((nl = buf.indexOf('\n')) !== -1) {
-        const line = buf.slice(0, nl)
-        buf = buf.slice(nl + 1)
-        const m = line.match(_READY_RE)
+    function pollTail() {
+      const currentTail = outputTail?.text?.() || ''
+      if (currentTail && checkAndResolve(currentTail)) {
+        return
+      }
 
-        if (m) {
-          cleanup()
-          resolve(parseInt(m[1], 10))
-
-          return
-        }
+      const described = describeOutputTail()
+      if (described && checkAndResolve(described)) {
+        return
       }
     }
 
@@ -101,9 +144,14 @@ function waitForDashboardPort(child, timeoutMs = resolvePortAnnounceTimeoutMs(),
       reject(new Error(`Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)`))
     }, timeoutMs)
 
-    child.stdout.on('data', onData)
-    child.on('exit', onExit)
-    child.on('error', onError)
+    child.stdout?.on?.('data', onData)
+    child.on?.('exit', onExit)
+    child.on?.('error', onError)
+
+    pollInterval = setInterval(pollTail, 50)
+    if (typeof pollInterval?.unref === 'function') {
+      pollInterval.unref()
+    }
   })
 }
 
@@ -126,8 +174,19 @@ function waitForDashboardReadyFile(
   readyFile,
   child,
   timeoutMs = resolvePortAnnounceTimeoutMs(),
-  describeOutputTail = () => ''
+  describeOutputTail = () => '',
+  outputTail?: { text?: () => string } | null
 ) {
+  const initialPort = readDashboardReadyFile(readyFile)
+  if (initialPort) {
+    return Promise.resolve(initialPort)
+  }
+
+  const prebuffered = parseAnnouncedPort(outputTail?.text?.() || '') ?? parseAnnouncedPort(describeOutputTail())
+  if (prebuffered !== null) {
+    return Promise.resolve(prebuffered)
+  }
+
   return new Promise((resolve, reject) => {
     let done = false
     let interval = null
@@ -144,14 +203,31 @@ function waitForDashboardReadyFile(
         clearInterval(interval)
       }
 
-      child.off('exit', onExit)
-      child.off('error', onError)
+      child.stdout?.off?.('data', onData)
+      child.off?.('exit', onExit)
+      child.off?.('error', onError)
     }
 
     function check() {
       const port = readDashboardReadyFile(readyFile)
 
       if (port) {
+        cleanup()
+        resolve(port)
+        return
+      }
+
+      const tailPort = parseAnnouncedPort(outputTail?.text?.() || '') ?? parseAnnouncedPort(describeOutputTail())
+      if (tailPort !== null) {
+        cleanup()
+        resolve(tailPort)
+      }
+    }
+
+    function onData(chunk) {
+      const text = chunk.toString()
+      const port = parseAnnouncedPort(text)
+      if (port !== null) {
         cleanup()
         resolve(port)
       }
@@ -172,11 +248,12 @@ function waitForDashboardReadyFile(
       reject(new Error(`Timed out waiting for Hermes backend port announcement (${timeoutMs}ms)`))
     }, timeoutMs)
 
-    child.on('exit', onExit)
-    child.on('error', onError)
+    child.stdout?.on?.('data', onData)
+    child.on?.('exit', onExit)
+    child.on?.('error', onError)
     interval = setInterval(check, 50)
 
-    if (typeof interval.unref === 'function') {
+    if (typeof interval?.unref === 'function') {
       interval.unref()
     }
 
@@ -189,6 +266,7 @@ function waitForDashboardPortAnnouncement(
   options: {
     /** Returns a formatted stdout/stderr tail suffix for exit errors (#93608). */
     describeOutputTail?: () => string
+    outputTail?: { text?: () => string } | null
     readyFile?: fs.PathOrFileDescriptor | null
     timeoutMs?: number
   } = {}
@@ -197,10 +275,10 @@ function waitForDashboardPortAnnouncement(
   const describeOutputTail = options.describeOutputTail ?? (() => '')
 
   if (options.readyFile) {
-    return waitForDashboardReadyFile(options.readyFile, child, timeoutMs, describeOutputTail)
+    return waitForDashboardReadyFile(options.readyFile, child, timeoutMs, describeOutputTail, options.outputTail)
   }
 
-  return waitForDashboardPort(child, timeoutMs, describeOutputTail)
+  return waitForDashboardPort(child, timeoutMs, describeOutputTail, options.outputTail)
 }
 
 export {

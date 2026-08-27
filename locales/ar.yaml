@@ -353,6 +353,8 @@ gateway:
     not_found:             "لم يُعثر على الجلسة في قاعدة البيانات."
     current_with_title:    "📌 الجلسة: `{session_id}`\nالعنوان: **{title}**"
     current_no_title:      "📌 الجلسة: `{session_id}`\nلم يُضبط عنوان. الاستخدام: `/title My Session Name`"
+    no_message_for_rename: "⚠️ لم يُعثر على رسالة حقيقية لبناء عنوان عليها. استخدم /rename <اسم> لتعيينه يدويًا."
+    generation_failed:     "⚠️ تعذّر توليد عنوان. استخدم /rename <اسم> لتعيينه يدويًا."
 
   topic:
     not_telegram_dm:         "الأمر /topic متاح فقط في محادثات Telegram الخاصة."

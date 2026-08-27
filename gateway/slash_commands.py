@@ -4895,6 +4895,102 @@ class GatewaySlashCommandsMixin:
             else:
                 return t("gateway.title.current_no_title", session_id=session_id)
 
+    async def _handle_rename_command(self, event: MessageEvent) -> str:
+        """Handle /rename command — set a title, or generate a smart one from the first real message."""
+        source = event.source
+        session_entry = await self.async_session_store.get_or_create_session(source)
+        session_id = session_entry.session_id
+
+        if not self._session_db:
+            from hermes_state import format_session_db_unavailable
+            return format_session_db_unavailable(prefix=t("gateway.shared.session_db_unavailable_prefix"))
+
+        # Ensure session exists in SQLite DB.
+        existing = await self._session_db.get_session(session_id)
+        if existing is None:
+            try:
+                await self._session_db.create_session(
+                    session_id=session_id,
+                    source=source.platform.value if source.platform else "unknown",
+                    user_id=source.user_id,
+                    chat_id=source.chat_id,
+                    chat_type=source.chat_type,
+                    thread_id=source.thread_id,
+                )
+            except Exception:
+                pass
+
+        title_arg = event.get_command_args().strip()
+        if title_arg:
+            # Explicit name: behave like /title (user authority).
+            try:
+                from hermes_state import SessionDB
+                sanitized = SessionDB.sanitize_title(title_arg)
+            except ValueError as e:
+                return t("gateway.shared.warn_passthrough", error=e)
+            if not sanitized:
+                return t("gateway.title.empty_after_clean")
+            try:
+                if await self._session_db.set_session_title(session_id, sanitized):
+                    schedule_rename = getattr(
+                        self, "_schedule_telegram_topic_title_rename", None
+                    )
+                    if callable(schedule_rename):
+                        try:
+                            await asyncio.to_thread(schedule_rename, source, session_id, sanitized)
+                        except Exception:
+                            logger.debug("Failed to rename Telegram topic from /rename", exc_info=True)
+                    return t("gateway.title.set_to", title=sanitized)
+                else:
+                    return t("gateway.title.not_found")
+            except ValueError as e:
+                return t("gateway.shared.warn_passthrough", error=e)
+
+        # No argument: generate a smart title from the first real message.
+        opener = None
+        try:
+            from agent.message_content import flatten_message_text
+            from agent.title_generator import (
+                generate_title,
+                is_titleable_user_message,
+            )
+            msgs = await self._session_db.get_messages(session_id) or []
+            for m in msgs:
+                if m.get("role") != "user":
+                    continue
+                content = m.get("content")
+                text = content if isinstance(content, str) else flatten_message_text(content)
+                if is_titleable_user_message(text):
+                    opener = text
+                    break
+        except Exception as e:
+            logger.debug("Failed to read messages for /rename", exc_info=True)
+            return t("gateway.shared.warn_passthrough", error=e)
+        if not opener:
+            return t("gateway.title.no_message_for_rename")
+        try:
+            new_title = await asyncio.to_thread(generate_title, opener)
+        except Exception as e:
+            logger.debug("Title generation failed for /rename", exc_info=True)
+            return t("gateway.shared.warn_passthrough", error=e)
+        if not new_title:
+            return t("gateway.title.generation_failed")
+        try:
+            if await self._session_db.set_session_title(session_id, new_title):
+                schedule_rename = getattr(
+                    self, "_schedule_telegram_topic_title_rename", None
+                )
+                if callable(schedule_rename):
+                    try:
+                        await asyncio.to_thread(schedule_rename, source, session_id, new_title)
+                    except Exception:
+                        logger.debug("Failed to rename Telegram topic from /rename", exc_info=True)
+                return t("gateway.title.set_to", title=new_title)
+            else:
+                return t("gateway.title.not_found")
+        except ValueError as e:
+            return t("gateway.shared.warn_passthrough", error=e)
+
     async def _handle_resume_command(self, event: MessageEvent) -> str:
         """Handle /resume command — list or switch to a previous session."""
         if not self._session_db:

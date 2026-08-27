@@ -12173,6 +12173,83 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             else:
                 from hermes_state import format_session_db_unavailable
                 _cprint(f"  {format_session_db_unavailable()}")
+        elif canonical == "rename":
+            parts = cmd_original.split(maxsplit=1)
+            if len(parts) > 1 and parts[1].strip():
+                # Explicit name given: behave exactly like /title (user authority).
+                raw_title = parts[1].strip()
+                if self._session_db:
+                    try:
+                        from hermes_state import SessionDB
+                        new_title = SessionDB.sanitize_title(raw_title)
+                    except ValueError as e:
+                        _cprint(f"  {e}")
+                        return True
+                    if not new_title:
+                        _cprint("  Title is empty after cleanup. Please use printable characters.")
+                    elif self._session_db.get_session(self.session_id):
+                        try:
+                            if self._session_db.set_session_title(self.session_id, new_title):
+                                self._status_bar_title_checked_at = 0.0
+                                _cprint(f"  Session renamed: {new_title}")
+                            else:
+                                _cprint("  Session not found in database.")
+                        except ValueError as e:
+                            _cprint(f"  {e}")
+                    else:
+                        _cprint("  Session not found in database.")
+                else:
+                    from hermes_state import format_session_db_unavailable
+                    _cprint(f"  {format_session_db_unavailable()}")
+            else:
+                # No argument: generate a smart title from the first real message.
+                if not self._session_db:
+                    from hermes_state import format_session_db_unavailable
+                    _cprint(f"  {format_session_db_unavailable()}")
+                    return True
+                session = self._session_db.get_session(self.session_id)
+                if not session:
+                    _cprint("  Session not found in database.")
+                    return True
+                opener = None
+                try:
+                    from agent.message_content import flatten_message_text
+                    from agent.title_generator import (
+                        generate_title,
+                        is_titleable_user_message,
+                    )
+                    msgs = self._session_db.get_messages(self.session_id) or []
+                    for m in msgs:
+                        if m.get("role") != "user":
+                            continue
+                        content = m.get("content")
+                        text = content if isinstance(content, str) else flatten_message_text(content)
+                        if is_titleable_user_message(text):
+                            opener = text
+                            break
+                except Exception as e:
+                    _cprint(f"  Could not read messages: {e}")
+                    return True
+                if not opener:
+                    _cprint("  No real message found to base a title on. Use /rename <name> to set one manually.")
+                    return True
+                _cprint("  Generating a smart title from the first message…")
+                try:
+                    new_title = generate_title(opener)
+                except Exception as e:
+                    _cprint(f"  Title generation failed: {e}")
+                    return True
+                if not new_title:
+                    _cprint("  Could not generate a title. Use /rename <name> to set one manually.")
+                    return True
+                try:
+                    if self._session_db.set_session_title(self.session_id, new_title):
+                        self._status_bar_title_checked_at = 0.0
+                        _cprint(f"  Session renamed: {new_title}")
+                    else:
+                        _cprint("  Session not found in database.")
+                except ValueError as e:
+                    _cprint(f"  {e}")
         elif canonical == "handoff":
             if not self._handle_handoff_command(cmd_original):
                 return False

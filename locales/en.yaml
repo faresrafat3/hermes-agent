@@ -364,6 +364,8 @@ gateway:
     not_found:             "Session not found in database."
     current_with_title:    "📌 Session: `{session_id}`\nTitle: **{title}**"
     current_no_title:      "📌 Session: `{session_id}`\nNo title set. Usage: `/title My Session Name`"
+    no_message_for_rename: "⚠️ No real message found to base a title on. Use /rename <name> to set one manually."
+    generation_failed:     "⚠️ Could not generate a title. Use /rename <name> to set one manually."
 
   topic:
     not_telegram_dm:         "The /topic command is only available in Telegram private chats."
